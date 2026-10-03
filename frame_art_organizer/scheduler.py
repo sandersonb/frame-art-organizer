@@ -49,6 +49,25 @@ def plan(conn: sqlite3.Connection, *, device_id, period, fit_mode, pipeline_vers
     return desired, to_add, to_remove, present
 
 
+def _switch_display_away(client, removing: set[str], keep: list[str]) -> None:
+    """If the photo on the wall is about to be deleted, show a surviving one first.
+
+    Deleting the displayed item flickers (API notes §8). Only acts when the TV is in Art Mode:
+    otherwise nothing is visible, and `select(show=False)` must never pull someone out of
+    watching TV. Purely cosmetic, so ANY failure is swallowed — the real deletes that follow
+    decide whether the TV is reachable.
+    """
+    if not removing or not keep:
+        return
+    try:
+        if client.artmode() != "on":
+            return
+        if client.current().get("content_id") in removing:
+            client.select(keep[0], show=False)
+    except Exception:  # noqa: BLE001
+        log.debug("could not switch the display away before deleting (cosmetic)", exc_info=True)
+
+
 def _apply_slideshow(client: FrameClient, period) -> None:
     """Set the MY-C0002 slideshow; if the interval is rejected, fall back to 3 min."""
     try:
@@ -87,6 +106,7 @@ def refresh(client: FrameClient, conn: sqlite3.Connection, *, device_id, period,
         )
         return {"desired": 0, "added": 0, "removed": 0, "errors": 0, "skipped": "empty-set",
                 "harvested": 0, "removals_skipped": False, "pending_adds": 0, "mattes_used": {},
+                "uploads": [],
                 "interval": period["interval"], "shuffle": period["shuffle"]}
 
     added = removed = errors = 0
@@ -106,11 +126,18 @@ def refresh(client: FrameClient, conn: sqlite3.Connection, *, device_id, period,
                       period["name"])
         removals_ok = False
 
+    # Read the preferences AFTER the harvest. The plan rows carry copies taken before it, so an
+    # edit the user made on the TV since the last run (just harvested above) would otherwise be
+    # missed by this run's uploads: the old item is deleted, the new one gets the stale matte,
+    # and the edit is lost for good. (Found by the migration dress rehearsal.)
+    prefs = store.asset_matte_prefs(conn)
     adds = to_add if limit is None else to_add[:max(0, limit)]
     added_assets: set[int] = set()
     mattes_used: dict[str, int] = {}
+    uploads: list[dict] = []   # what went to the wall this run — the canary needs to see it
     for r in adds:
-        matte = mattes.matte_for(r["pref_matte"], r["pref_shape"], r["width"], r["height"], matte_cfg)
+        pref_matte, pref_shape = prefs.get(r["asset_id"], (None, None))
+        matte = mattes.matte_for(pref_matte, pref_shape, r["width"], r["height"], matte_cfg)
         placement_id = store.create_pending_placement(conn, device_id, r["derivative_id"], matte)
         try:
             data = Path(r["path"]).read_bytes()
@@ -126,11 +153,19 @@ def refresh(client: FrameClient, conn: sqlite3.Connection, *, device_id, period,
         store.add_rotation_event(conn, device_id, r["asset_id"], "added", period["name"])
         added_assets.add(r["asset_id"])
         mattes_used[matte] = mattes_used.get(matte, 0) + 1
+        uploads.append({"asset_id": r["asset_id"], "name": r["original_name"], "content_id": content_id,
+                        "size": (r["width"], r["height"]), "matte": matte})
         added += 1
 
     removals = to_remove if removals_ok else []
     if limit is not None:
         removals = sorted(removals, key=lambda p: p["asset_id"] not in added_assets)[:added]
+    if removals:
+        remove_ids = {p["content_id"] for p in removals if p["content_id"]}
+        keep = [p["content_id"] for p in sorted(store.present_placements(conn, device_id),
+                                                key=lambda p: p["id"], reverse=True)
+                if p["content_id"] and p["content_id"] not in remove_ids]   # newest first
+        _switch_display_away(client, remove_ids, keep)
     for p in removals:
         try:
             if p["content_id"]:
@@ -151,5 +186,5 @@ def refresh(client: FrameClient, conn: sqlite3.Connection, *, device_id, period,
                     period["name"])
     return {"desired": len(desired), "added": added, "removed": removed, "errors": errors,
             "harvested": len(harvested), "removals_skipped": not removals_ok,
-            "pending_adds": len(to_add) - len(adds), "mattes_used": mattes_used,
+            "pending_adds": len(to_add) - len(adds), "mattes_used": mattes_used, "uploads": uploads,
             "interval": period["interval"], "shuffle": period["shuffle"]}

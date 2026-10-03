@@ -113,7 +113,8 @@ class Daemon:
                     self._applied_period = period["name"]
                     self._last_refresh = now
                     self._last_harvest = now  # refresh harvests first, so this counts
-                    log.info("refresh[%s] %s", period["name"], res)
+                    log.info("refresh[%s] %s", period["name"],
+                             {k: v for k, v in res.items() if k != "uploads"})
                 else:
                     if woke:
                         fc.set_slideshow(duration=period["interval"], shuffle=period["shuffle"])

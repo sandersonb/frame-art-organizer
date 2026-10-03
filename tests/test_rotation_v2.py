@@ -188,3 +188,28 @@ def test_failed_uploads_mean_no_evictions_under_a_limit(conn, migration):
     res = _refresh(BrokenUploads([item(f"MY_F{n:04d}") for n in (1, 2, 3)]), conn, dev, limit=2, **V2)
     assert (res["added"], res["errors"], res["removed"]) == (0, 2, 0)       # never evict what wasn't replaced
     assert sum(1 for r in store.present_placements(conn, dev) if r["width"] == 3840) == 3
+
+
+# --- regression: found by the migration dress rehearsal ---------------------------------------
+def test_an_edit_harvested_in_this_refresh_is_applied_to_the_same_refreshs_upload(conn, tmp_path):
+    """The user edits photo 1's matte on the TV; the very next refresh swaps photo 1 to its v2
+    derivative. The harvest must run before the upload picks its matte, or the edit is lost
+    (the old item is deleted, the new one gets the stale preference)."""
+    dev = add_device(conn)
+    a, d_v1, p_v1 = resident(conn, dev, 1)                           # resident on v1, matte 'none'
+    add_derivative(conn, a, width=3840, height=2160, fit="auto", pv=2, path=_file(tmp_path, "v2.jpg"))
+    client = FakeClient([item("MY_F0001", "modern_polar")])           # ...the user just changed it on the TV
+
+    res = _refresh(client, conn, dev, fit="auto", pv=2)
+
+    assert res["harvested"] == 1
+    assert _upload_of(client) == [("upload", "modern_polar")]         # the NEW upload carries the user's choice
+    assert conn.execute("SELECT matte FROM asset_policy WHERE asset_id = ?", (a,)).fetchone()[0] == "modern_polar"
+
+
+def test_refresh_reports_what_it_uploaded_so_a_canary_can_be_inspected(conn, wants_one):
+    dev, a2, tmp = wants_one
+    add_derivative(conn, a2, width=1600, height=1200, path=_file(tmp, "2.jpg"))     # a native 4:3
+    res = _refresh(FakeClient([item("MY_F0001")]), conn, dev)
+    assert res["uploads"] == [{"asset_id": a2, "name": "photo2.jpg", "content_id": "MY_F0101",
+                               "size": (1600, 1200), "matte": "flexible_black"}]

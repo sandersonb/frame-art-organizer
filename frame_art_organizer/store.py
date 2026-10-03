@@ -248,6 +248,7 @@ def present_placements(conn, device_id) -> list[sqlite3.Row]:
     return conn.execute(
         """SELECT p.id, p.content_id, p.matte AS matte, d.id AS derivative_id,
                   d.asset_id AS asset_id, d.width AS width, d.height AS height,
+                  d.fit_mode AS fit_mode, d.pipeline_version AS pipeline_version,
                   a.original_name AS original_name
            FROM placement p
            JOIN derivative d ON d.id = p.derivative_id
