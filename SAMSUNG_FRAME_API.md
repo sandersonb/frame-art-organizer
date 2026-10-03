@@ -401,6 +401,24 @@ the user; not photographed). With 2026-10-01's API-set portrait `flexible_black`
 `shadowbox_byzantine`, `flexible_black` is now verified via the API on **all four non-16:9
 shapes**. The TV was restored and verified identical to its pre-test baseline afterwards.
 
+### 7.12 Live migration rehearsal (2026-10-02)
+The real v1 → v2 code (`uploader.sync`, `harvest`, `scheduler.refresh`, with a distinct client
+name, the slideshow setting untouched) run against the live TV with **six synthetic photos**
+(16:9, 3:2, 4:3, portrait, square, 21:9), following the §7.10 protocol. All observations are the
+user's, at the TV, plus the TV's own listing:
+
+| Step | Result |
+|---|---|
+| v1 seed | Six 3840×2160 uploads, matte `none`; the portrait showed as a cropped 16:9 band. |
+| TV edits | The user set the 3:2 to `modern_black` and the portrait (cropped) to `modernwide_black`; a dry-run harvest read both back. |
+| Canary of 2 | The photo on the wall was among the two replaced: the wall switched away first — smooth, no flicker or dialog. The new 3:2 (1500×844, FILL) kept `modern_black`; the new portrait (800×1200, FIT) got `flexible_black` — the `modernwide_black` choice was **not** carried to the whole portrait (the combination that crashed the TV on 2026-10-01). |
+| The other four | 16:9 1920×1080 `none`; 4:3 1200×900, 1:1 1000×1000 and 21:9 2400×1000, each `flexible_black`: **whole, no crop, black matte**, each reported back at its native size. |
+| Settled | A second refresh added/removed nothing; a harvest found nothing. |
+| Rollback | Config back to cover/v1: all six swapped back to the retained 3840×2160 derivatives, the TV-chosen mattes re-applied (valid again on the 16:9 version), whole photos back to `none` (cropped). |
+| Cleanup | Exactly the 18 recorded test IDs deleted; the wall restored; a diff against the pre-test baseline showed the 41 real photos untouched (nothing missing, no field changes, no strays). |
+
+Timing: a 2-photo batch ≈ 14 s, 4 ≈ 22 s, a full 6-photo swap ≈ 34 s (these are small test JPEGs).
+
 ---
 
 ## 8. Gotchas & hard-won caveats
