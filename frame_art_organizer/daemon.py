@@ -21,7 +21,7 @@ import logging
 import threading
 from datetime import datetime, timedelta, timezone
 
-from . import config, db, scheduler, store
+from . import config, db, ingest, scheduler, store
 from . import harvest as harvest_mod
 from .frame_client import FrameAsleep, FrameClient
 
@@ -41,6 +41,8 @@ class Daemon:
         self.fit = img.default_fit
         self.pv = img.pipeline_version
         self.matte_cfg = img.matte
+        self.quality = img.jpeg_quality
+        self.tolerance = img.crop_tolerance
         self.refresh_interval = timedelta(
             hours=float(cfg.get("schedule", {}).get("refresh_hours", 24))
         )
@@ -52,6 +54,18 @@ class Daemon:
 
     def stop(self) -> None:
         self._stop.set()
+
+    def _render_pending(self, conn) -> None:
+        """Render derivatives for photos lacking one at the current pipeline version, BEFORE a
+        refresh. Only the web upload and `fao ingest` rendered before, so a pipeline_version bump
+        would have looked like an empty library. A bad photo must never block rotation."""
+        try:
+            n = ingest.render_pending(conn, self.paths, self.fit, self.pv, self.quality,
+                                      crop_tolerance=self.tolerance)
+            if n:
+                log.info("rendered %d pending derivative(s) before the refresh", n)
+        except Exception:  # noqa: BLE001
+            log.exception("render_pending failed; continuing with what is already rendered")
 
     def _harvest_due(self, now: datetime) -> bool:
         if self.harvest_interval.total_seconds() <= 0:
@@ -87,6 +101,8 @@ class Daemon:
 
         conn = db.open_db(self.paths["database"])
         try:
+            if due:
+                self._render_pending(conn)   # CPU/disk work: do it before holding the TV connection
             with fc:
                 device_id = self._ensure_device(conn, fc)
                 if due:

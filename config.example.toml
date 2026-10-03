@@ -23,9 +23,20 @@ database    = "data/state.db"   # SQLite store
 width = 3840                    # the panel is native 3840x2160
 height = 2160
 jpeg_quality = 92
-default_matte = "none"          # Frame matte; "none" fills the panel. See get_matte_list.
-default_fit = "cover"           # cover = crop-fill to 16:9, contain = letterbox with bars
+default_matte = "none"          # matte for 16:9 photos: "none" fills the panel, else <type>_<color>
+default_fit = "cover"           # cover = crop-fill to 16:9, contain = letterbox with bars,
+                                #   auto = the v2 pipeline below
 pipeline_version = 1            # bump to force re-render of all derivatives
+
+# --- v2 pipeline (native resolution, never upscaled). Ignored while default_fit is cover/contain.
+# To adopt it: run `fao plan-report`, review the FILL/FIT split, then set default_fit = "auto"
+# and pipeline_version = 2.
+crop_tolerance = 0.16           # a crop to 16:9 trimming <= this is applied (3:2 trims 15.6 %);
+                                #   otherwise the photo is kept whole and shown inside a matte
+auto_matte = true               # upload kept-whole photos with fit_matte; false = the TV crops them
+fit_matte_type = "flexible"     # flexible | shadowbox — the only types verified for non-16:9 photos
+fit_matte_color = "black"       # one of the TV's 16 colors (black looks dark slate on the panel)
+low_res_long_edge = 1280        # plan-report flags photos below this long edge; never blocks
 
 [schedule]
 interval_minutes = 15          # within-set cadence; MUST be in {3,15,60,720,1440,10080}

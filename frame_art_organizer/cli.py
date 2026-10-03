@@ -21,7 +21,7 @@ from pathlib import Path
 
 import urllib3
 
-from . import config, db, images, ingest, scheduler, store, uploader
+from . import config, db, images, ingest, mattes, scheduler, store, uploader
 from . import harvest as harvest_mod
 from .frame_client import FrameAsleep, FrameClient
 
@@ -29,6 +29,7 @@ from .frame_client import FrameAsleep, FrameClient
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 EXIT_ASLEEP = 2
+EXIT_REFUSED = 3   # a guard refused the request (e.g. an unverified matte for this shape)
 
 
 def _client(args) -> tuple[FrameClient, dict]:
@@ -60,15 +61,14 @@ def cmd_db_init(args) -> int:
 
 def cmd_ingest(args) -> int:
     conn, paths, cfg = _library(args)
-    img = cfg.get("image", {})
+    img = config.image_settings(cfg)
     for key in ("inbox", "originals", "derivatives"):
         paths[key].mkdir(parents=True, exist_ok=True)
     s = ingest.scan(conn, paths)
     rendered = ingest.render_pending(
         conn, paths,
-        fit_mode=img.get("default_fit", "cover"),
-        pipeline_version=int(img.get("pipeline_version", 1)),
-        quality=int(img.get("jpeg_quality", 92)),
+        fit_mode=img.default_fit, pipeline_version=img.pipeline_version,
+        quality=img.jpeg_quality, crop_tolerance=img.crop_tolerance,
     )
     print(f"ingest: new={s['new']} dup={s['dup']} broken={s['broken']}; rendered={rendered}")
     return 0
@@ -211,14 +211,13 @@ def _active_period(cfg):
 
 def cmd_schedule_show(args) -> int:
     conn, _, cfg = _library(args)
-    img = cfg.get("image", {})
+    img = config.image_settings(cfg)
     period = _active_period(cfg)
     dev = conn.execute("SELECT id FROM device ORDER BY id LIMIT 1").fetchone()
     device_id = dev["id"] if dev else 0
     desired, to_add, to_remove, present = scheduler.plan(
         conn, device_id=device_id, period=period,
-        fit_mode=img.get("default_fit", "cover"),
-        pipeline_version=int(img.get("pipeline_version", 1)),
+        fit_mode=img.default_fit, pipeline_version=img.pipeline_version,
     )
     print(f"active period : {period['name']}  collections={period['collections']}")
     print(f"slideshow     : interval={period['interval']}m shuffle={period['shuffle']} "
@@ -240,13 +239,65 @@ def cmd_schedule_refresh(args) -> int:
         res = scheduler.refresh(
             fc, conn, device_id=device_id, period=period,
             fit_mode=img.default_fit, pipeline_version=img.pipeline_version,
-            matte_cfg=img.matte,
+            matte_cfg=img.matte, limit=getattr(args, "limit", None),
         )
     print(f"refresh[{period['name']}]: desired={res['desired']} added={res['added']} "
           f"removed={res['removed']} errors={res['errors']} matte_edits={res['harvested']}; "
           f"slideshow {res['interval']}m shuffle={res['shuffle']}")
+    if res["mattes_used"]:
+        print(f"  mattes on new uploads: {res['mattes_used']}")
+    if res["pending_adds"]:
+        print(f"  --limit reached: {res['pending_adds']} more swap(s) pending — run again to continue")
     if res["removals_skipped"]:
         print("  WARNING: matte harvest failed, so evictions were skipped this run; see the log")
+    return 0
+
+
+def _plan_rows(conn, img: config.ImageSettings, tolerance: float) -> list[dict]:
+    """What the v2 pipeline WOULD do with each active photo. Pure reads; renders nothing."""
+    prefs = store.asset_matte_prefs(conn)
+    rows = []
+    for a in store.list_assets(conn):
+        if a["status"] != "active" or not a["width"] or not a["height"]:
+            continue
+        plan = images.plan_render(a["width"], a["height"], tolerance)
+        pref_matte, pref_shape = prefs.get(a["id"], (None, None))
+        matte = mattes.matte_for(pref_matte, pref_shape, plan.size[0], plan.size[1], img.matte)
+        rows.append({
+            "id": a["id"], "name": a["original_name"], "source": plan.source, "trim": plan.trim,
+            "kind": plan.kind, "size": plan.size, "shape": plan.shape, "matte": matte,
+            "tv_choice": bool(pref_matte) and matte == mattes.normalize(pref_matte),
+            "low_res": images.low_res(a["width"], a["height"], img.low_res_long_edge),
+        })
+    return rows
+
+
+def cmd_plan_report(args) -> int:
+    """Dry run of the v2 render plan over the library — review it before flipping default_fit."""
+    conn, _, cfg = _library(args)
+    img = config.image_settings(cfg)
+    tol = img.crop_tolerance if args.crop_tolerance is None else args.crop_tolerance
+    rows = _plan_rows(conn, img, tol)
+    m = img.matte
+    print(f"plan-report: {len(rows)} active photo(s)  crop_tolerance={tol}  "
+          f"default_matte={m.default_matte}  fit_matte={m.fit_matte} (auto_matte={m.auto_matte})")
+    if not rows:
+        print("(no active photos)")
+        return 0
+    print(f"{'id':>4}  {'name':<26} {'source':>11} {'trim':>6}  {'plan':<4} {'output':>11}  "
+          f"{'shape':<5} {'matte':<18} flags")
+    for r in rows:
+        flags = ", ".join(f for f, on in (("low-res", r["low_res"]), ("TV-chosen matte", r["tv_choice"])) if on)
+        print(f"{r['id']:>4}  {(r['name'] or '')[:26]:<26} {r['source'][0]:>5}x{r['source'][1]:<5} "
+              f"{r['trim']:>5.1%}  {r['kind'].upper():<4} {r['size'][0]:>5}x{r['size'][1]:<5} "
+              f"{r['shape']:<5} {r['matte']:<18} {flags}")
+    fill = sum(r["kind"] == "fill" for r in rows)
+    print(f"\nsummary: FILL {fill} · FIT {len(rows) - fill} · low-res {sum(r['low_res'] for r in rows)} · "
+          f"with a TV-chosen matte {sum(r['tv_choice'] for r in rows)}")
+    cropped = [r for r in rows if r["kind"] == "fill" and r["trim"] > 0.0001]
+    if cropped:
+        worst = max(cropped, key=lambda r: r["trim"])
+        print(f"largest crop: {worst['trim']:.1%} (asset {worst['id']}, {worst['name']})")
     return 0
 
 
@@ -326,15 +377,31 @@ def cmd_list(args) -> int:
 
 def cmd_push(args) -> int:
     fc, cfg = _client(args)
-    imgcfg = cfg.get("image", {})
-    data = images.normalize_to_frame(
-        args.file,
-        mode=args.fit or imgcfg.get("default_fit", "cover"),
-        quality=int(imgcfg.get("jpeg_quality", 92)),
-    )
-    print(f"normalized {args.file} -> {len(data):,} bytes ({images.FRAME_W}x{images.FRAME_H})")
+    img = config.image_settings(cfg)
+    mode = args.fit or img.default_fit
+    if mode == "auto":
+        data, plan = images.render_derivative(args.file, crop_tolerance=img.crop_tolerance,
+                                              quality=img.jpeg_quality)
+        width, height = plan.size
+        how = f"{plan.kind}, {width}x{height}"
+    else:
+        data = images.normalize_to_frame(args.file, mode=mode, quality=img.jpeg_quality)
+        width, height = images.FRAME_W, images.FRAME_H
+        how = f"{mode}, {width}x{height}"
+
+    if args.matte:
+        matte = args.matte.strip().lower()
+        if (images.shape_class(width, height) == "odd" and matte != "none"
+                and matte.split("_")[0] not in mattes.ODD_ALLOWED and not args.force_matte):
+            print(f"refusing: matte {matte!r} is not verified for a non-16:9 photo ({width}x{height}); "
+                  f"the TV can crash when it displays it. Verified types: "
+                  f"{', '.join(mattes.ODD_ALLOWED)}. Use --force-matte to override.", file=sys.stderr)
+            return EXIT_REFUSED
+    else:
+        matte = mattes.matte_for(None, None, width, height, img.matte)
+    print(f"normalized {args.file} -> {len(data):,} bytes ({how}); matte={matte}")
     with fc:
-        cid = fc.upload_jpeg(data, matte=args.matte or imgcfg.get("default_matte", "none"))
+        cid = fc.upload_jpeg(data, matte=matte)
         print(f"uploaded -> {cid}")
         if args.show:
             fc.select(cid, show=True)
@@ -371,8 +438,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     pp = sub.add_parser("push", help="normalize + upload a local image")
     pp.add_argument("file")
-    pp.add_argument("--fit", choices=["cover", "contain"], help="override fit mode")
-    pp.add_argument("--matte", help="override Frame matte (e.g. none, modern)")
+    pp.add_argument("--fit", choices=["cover", "contain", "auto"], help="override fit mode")
+    pp.add_argument("--matte", help="override Frame matte (e.g. none, modern_polar)")
+    pp.add_argument("--force-matte", action="store_true",
+                    help="allow a matte type not verified for a non-16:9 photo (can crash the TV)")
     pp.add_argument("--show", action="store_true", help="display it after upload")
     pp.set_defaults(func=cmd_push)
 
@@ -417,7 +486,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     # scheduler
     sub.add_parser("schedule-show", help="show active period + desired set (dry run)").set_defaults(func=cmd_schedule_show)
-    sub.add_parser("schedule-refresh", help="compose the set, push to the TV, set slideshow").set_defaults(func=cmd_schedule_refresh)
+    psr = sub.add_parser("schedule-refresh", help="compose the set, push to the TV, set slideshow")
+    psr.add_argument("--limit", type=int, default=None, metavar="N",
+                     help="canary: upload at most N photos and evict no more than were added")
+    psr.set_defaults(func=cmd_schedule_refresh)
+    ppr = sub.add_parser("plan-report", help="dry run: how the v2 render plan would treat each photo")
+    ppr.add_argument("--crop-tolerance", type=float, default=None, metavar="X",
+                     help="override [image] crop_tolerance for this report")
+    ppr.set_defaults(func=cmd_plan_report)
 
     # web UI + daemon
     ps = sub.add_parser("serve", help="run the web UI (+ scheduler daemon per config)")

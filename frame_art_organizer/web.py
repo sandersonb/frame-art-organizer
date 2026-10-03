@@ -40,10 +40,8 @@ def create_app(config_path: str | None = None, run_daemon: bool | None = None) -
     store.ensure_collection_colors(_boot)  # backfill colors for pre-migration collections
     _boot.close()
 
-    img = cfg.get("image", {})
-    fit = img.get("default_fit", "cover")
-    pipeline_version = int(img.get("pipeline_version", 1))
-    quality = int(img.get("jpeg_quality", 92))
+    img = config.image_settings(cfg)   # validated: a bad [image] value stops the server at startup
+    fit, pipeline_version, quality = img.default_fit, img.pipeline_version, img.jpeg_quality
 
     if run_daemon is None:
         run_daemon = bool(cfg.get("daemon", {}).get("enabled", False))
@@ -137,7 +135,8 @@ def create_app(config_path: str | None = None, run_daemon: bool | None = None) -
                         store.assign_collection(c, asset_id, cid)
                 finally:
                     tmp.unlink(missing_ok=True)  # original is archived by ingest
-            ingest.render_pending(c, paths, fit, pipeline_version, quality)
+            ingest.render_pending(c, paths, fit, pipeline_version, quality,
+                                  crop_tolerance=img.crop_tolerance)
         finally:
             c.close()
         return RedirectResponse("/", status_code=303)

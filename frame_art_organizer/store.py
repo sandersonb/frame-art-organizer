@@ -268,6 +268,12 @@ def set_asset_matte(conn, asset_id, matte, shape) -> None:
     )
 
 
+def asset_matte_prefs(conn) -> dict:
+    """{asset_id: (matte, matte_shape)} for every asset the user chose a matte for on the TV."""
+    return {r["asset_id"]: (r["matte"], r["matte_shape"]) for r in conn.execute(
+        "SELECT asset_id, matte, matte_shape FROM asset_policy WHERE matte IS NOT NULL")}
+
+
 def set_placement_matte(conn, placement_id, matte) -> None:
     """Record the matte currently on the TV for a placement. Does not commit."""
     conn.execute("UPDATE placement SET matte = ? WHERE id = ?", (matte, placement_id))

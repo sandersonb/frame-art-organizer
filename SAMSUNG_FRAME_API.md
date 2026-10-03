@@ -440,8 +440,10 @@ shapes**. The TV was restored and verified identical to its pre-test baseline af
   external media box (the Frame's One Connect box), and **power-cycling that box recovered
   it** (user-reported, ~99 % sure). The trigger is unknown. Unproven suspects: the TV's
   hard restart the day before and/or accumulated half-open sessions from killed or
-  timed-out clients (the project's `_bounded()` abandons a hung worker thread without
-  closing its socket). **TCP/REST reachability is not proof the art API will answer.** Keep
+  timed-out clients. **A client-side leak was found and fixed (2026-10-02):** the project's
+  `FrameClient.close()` closed only the remote socket, but `tv.art()` builds a *separate*
+  `SamsungTVArt` with its own websocket that was never closed — and `_bounded()` abandoned
+  a hung worker thread blocked in `recv()`, keeping it alive forever. It now closes both. **TCP/REST reachability is not proof the art API will answer.** Keep
   every art call bounded, treat a timeout as "not available now" (the project's
   `FrameTimeout`), and close clients promptly. *(An earlier version of this note guessed
   the TV was on another input / not in Art Mode; that was wrong.)*

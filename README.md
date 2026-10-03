@@ -130,11 +130,21 @@ Web thumbnails are cached next to `derivatives` in a `thumbs/` dir.
 width = 3840              # the panel is native 3840x2160 — leave these
 height = 2160
 jpeg_quality = 92
-default_matte = "none"    # Frame matte applied on the TV; "none" fills the panel.
-                          #   others: modern, modernwide, shadowbox, panoramic, triptych, …
-default_fit = "cover"     # cover = crop-fill to 16:9; contain = letterbox with bars
+default_matte = "none"    # matte for 16:9 photos: "none" fills the panel, else <type>_<color>
+default_fit = "cover"     # cover = crop-fill to 16:9; contain = letterbox with bars; auto = v2
 pipeline_version = 1      # bump this to force a re-render of every derivative
+# v2 pipeline keys — ignored until default_fit = "auto":
+crop_tolerance = 0.16     # crop to 16:9 only if that trims <= this (3:2 trims 15.6 %)
+auto_matte = true         # keep other photos whole inside a matte (false = the TV crops them)
+fit_matte_type = "flexible"   # flexible | shadowbox (verified for non-16:9 photos)
+fit_matte_color = "black"
+low_res_long_edge = 1280  # plan-report flags photos below this; never blocks
 ```
+**The v2 pipeline** (opt-in) renders at native resolution and **never upscales**: a photo
+within `crop_tolerance` of 16:9 is cropped to exactly 16:9; anything else (portraits,
+squares, 4:3…) is kept whole and uploaded with a matte so it isn't cropped on the wall.
+`fao plan-report` shows exactly what it would do to each photo — review it before switching.
+Invalid values (e.g. a matte type the TV can't show for that shape) are rejected at startup.
 Note: the Frame's info overlay can show a photo's **date** (taken from EXIF on import) but
 **not a custom title** — that's a platform limitation (see SAMSUNG_FRAME_API.md). "Rename"
 in the UI sets a local label only.
