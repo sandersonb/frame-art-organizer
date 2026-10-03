@@ -22,6 +22,7 @@ from pathlib import Path
 import urllib3
 
 from . import config, db, images, ingest, scheduler, store, uploader
+from . import harvest as harvest_mod
 from .frame_client import FrameAsleep, FrameClient
 
 # The Frame's 8002 cert is self-signed; we intentionally don't verify it. Quiet the noise.
@@ -109,7 +110,10 @@ def cmd_sync(args) -> int:
         r = uploader.reconcile(fc, conn, device_id)
     print(f"sync: uploaded={s['uploaded']} errors={s['errors']}")
     print(f"reconcile: on_device={r['on_device']} ours_present={r['ours_present']} "
-          f"vanished={r['vanished']} orphans={len(r['orphans'])}")
+          f"vanished={r['vanished']} orphans={len(r['orphans'])} "
+          f"matte_edits={r['harvested']}")
+    if r["harvest_error"]:
+        print(f"  WARNING: matte harvest failed ({r['harvest_error']}); see the log")
     if r["orphans"]:
         print(f"  flagged orphans (not ours, left alone): {r['orphans']}")
     return 0
@@ -122,9 +126,36 @@ def cmd_reconcile(args) -> int:
         device_id = _ensure_device(conn, fc)
         r = uploader.reconcile(fc, conn, device_id)
     print(f"reconcile: on_device={r['on_device']} ours_present={r['ours_present']} "
-          f"vanished={r['vanished']} orphans={len(r['orphans'])}")
+          f"vanished={r['vanished']} orphans={len(r['orphans'])} "
+          f"matte_edits={r['harvested']}")
+    if r["harvest_error"]:
+        print(f"  WARNING: matte harvest failed ({r['harvest_error']}); see the log")
     if r["orphans"]:
         print(f"  flagged orphans: {r['orphans']}")
+    return 0
+
+
+def _print_matte_changes(changes, *, dry_run: bool) -> None:
+    verb = "would record" if dry_run else "recorded"
+    if not changes:
+        print("harvest: no matte edits found — the TV matches what we last uploaded")
+        return
+    print(f"harvest: {verb} {len(changes)} matte edit(s) made on the TV:")
+    for c in changes:
+        print(f"  asset={c['asset_id']:<4} {c['content_id']:<10} {c['old']} -> {c['new']:<22} "
+              f"shape={c['shape']}  {c['original_name']}")
+    if dry_run:
+        print("(dry run: nothing was written; run without --dry-run to record them)")
+
+
+def cmd_harvest(args) -> int:
+    """Read back matte edits made in the TV's own UI and remember them per asset."""
+    conn, _, _ = _library(args)
+    fc, _ = _client(args)
+    with fc:
+        device_id = _ensure_device(conn, fc)
+        changes = harvest_mod.harvest(fc, conn, device_id, apply=not args.dry_run)
+    _print_matte_changes(changes, dry_run=args.dry_run)
     return 0
 
 
@@ -214,8 +245,10 @@ def cmd_schedule_refresh(args) -> int:
             matte=img.get("default_matte", "none"),
         )
     print(f"refresh[{period['name']}]: desired={res['desired']} added={res['added']} "
-          f"removed={res['removed']} errors={res['errors']}; "
+          f"removed={res['removed']} errors={res['errors']} matte_edits={res['harvested']}; "
           f"slideshow {res['interval']}m shuffle={res['shuffle']}")
+    if res["removals_skipped"]:
+        print("  WARNING: matte harvest failed, so evictions were skipped this run; see the log")
     return 0
 
 
@@ -361,6 +394,9 @@ def build_parser() -> argparse.ArgumentParser:
     # placement (needs the TV)
     sub.add_parser("sync", help="upload derivatives to the Frame + reconcile").set_defaults(func=cmd_sync)
     sub.add_parser("reconcile", help="diff DB placements vs the Frame").set_defaults(func=cmd_reconcile)
+    ph = sub.add_parser("harvest", help="read back matte edits made on the TV and remember them")
+    ph.add_argument("--dry-run", action="store_true", help="show what would be recorded; write nothing")
+    ph.set_defaults(func=cmd_harvest)
     sub.add_parser("placements", help="list recorded placements").set_defaults(func=cmd_placements)
 
     # collections & policy (local)

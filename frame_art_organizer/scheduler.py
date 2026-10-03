@@ -68,6 +68,7 @@ def refresh(client: FrameClient, conn: sqlite3.Connection, *, device_id, period,
             period["name"], period["collections"] or "all",
         )
         return {"desired": 0, "added": 0, "removed": 0, "errors": 0, "skipped": "empty-set",
+                "harvested": 0, "removals_skipped": False,
                 "interval": period["interval"], "shuffle": period["shuffle"]}
 
     added = removed = errors = 0

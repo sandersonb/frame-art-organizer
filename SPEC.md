@@ -548,11 +548,16 @@ for p in present_placements:                   # ours, resident on the TV
 - **Only `matte_id`** is read; `portrait_matte_id` is ignored.
 - **TV wins.** The DB never pushes a matte to a resident item (`change_matte` is `-7`); a
   stored preference takes effect the next time that asset is *uploaded*.
-- **Where it runs:** (1) the **top of `scheduler.refresh()` and `uploader.sync()`**, before
-  any delete — *no harvest, no evict*: if the listing times out, the remove phase is
-  skipped (adds may proceed); (2) `reconcile`; (3) a slow **daemon tick** (default 15 min
-  while awake, one bounded call) so a tweak is captured even if the photo is later evicted
-  by something other than the scheduler; (4) `fao harvest` for one-shot use.
+- **Where it runs:** (1) the **top of `scheduler.refresh()`**, before any delete — *no
+  harvest, no evict*. If the TV can't answer (`FrameAsleep`/`FrameTimeout`) the **whole
+  refresh aborts** and the daemon retries, exactly as before — nothing is evicted. (Swallowing
+  that and returning normally would make the daemon record the refresh as done and wait 24 h.)
+  Any *other* harvest failure skips only the evictions; adds proceed, so a harvest bug can't
+  stall rotation. `uploader.sync` never evicts, so it doesn't harvest itself — the CLI runs
+  `reconcile` right after it; (2) `reconcile`, from the listing it already fetches; (3) a slow
+  **daemon tick** (`[daemon] harvest_minutes`, default 15 min while awake, one bounded call,
+  attempt-based so a failing TV backs off a full interval) so a tweak is captured even if the
+  photo is later evicted by something other than the scheduler; (4) `fao harvest [--dry-run]`.
 - Orphans (content we didn't upload) are ignored.
 
 ### 12.5 Schema — migration 3 (additive, forward-only)
@@ -606,7 +611,7 @@ rendering.
 | Step | What | Exit criteria |
 |---|---|---|
 | **M0 — Attended TV verification** *(no code)* — **DONE 2026-10-02** | Ran the matte × shape matrix with the §7.10 protocol, TV-UI-first with a polling watcher, then API-set (API notes §7.11): `flexible` and `shadowbox` offered and displayed whole on **2:3, 4:3, 1:1 and 21:9**; `flexible_black` set via the API displayed correctly on all four; wider-than-16:9 behaves like the other non-16:9 shapes. | **Cleared:** `ODD_ALLOWED = {flexible, shadowbox}` and the default `flexible_black` are verified; the ultrawide special case is gone. **Slideshow:** `get_slideshow_status` reads `off` while a slideshow visibly runs, so it is a getter misreport, not a state (§12.11); the M3 canary still watches the wall rotate. |
-| **M1 — Harvest only** | Migration 3, `store.harvest_mattes`, wired into `reconcile`, the top of `refresh`, and a daemon tick; `fao harvest`. Rendering untouched. | On the Pi, `fao harvest` records exactly the edits present at that time — as of 2026-10-02 three: `MY_F0083` and `MY_F0071` → `modernthin_black`, `MY_F0079` → `shadowbox_sage` (all shape `wide`); a second run reports none. TV unchanged (read-only). |
+| **M1 — Harvest only** — **BUILT** on branch `m1-matte-harvest` (58 tests; ships when merged and deployed to the Pi) | Migration 3, `store.harvest_mattes`, wired into `reconcile`, the top of `refresh`, and a daemon tick; `fao harvest`. Rendering untouched. | On the Pi, `fao harvest` records exactly the edits present at that time — as of 2026-10-02 three: `MY_F0083` and `MY_F0071` → `modernthin_black`, `MY_F0079` → `shadowbox_sage` (all shape `wide`); a second run reports none. TV unchanged (read-only). |
 | **M2 — v2 code, dormant** | `images.plan_render`, `mattes.py`, scheduler/uploader changes, tests. Config stays `cover` / `pipeline_version = 1`. `matte_for` is live: v1 derivatives are all 16:9 (`wide`) → preference-or-`none`, i.e. today's behavior **plus** honoring harvested preferences and `portrait_matte = none`. | Tests green; `fao plan-report` on the real library shows the FILL/FIT split with no surprises; an attended `schedule-refresh` behaves exactly as today, except that any newly uploaded photo uses its harvested matte preference. |
 | **M3 — Flip to v2** | Set `default_fit = "auto"`, `pipeline_version = 2`. Render all derivatives (daemon or `fao ingest`) **before** the first v2 refresh — selection only sees `(fit_mode, pipeline_version)` matches, so an unrendered library would look empty and the empty-set guard would skip. Then an **attended canary**: `schedule-refresh --limit 3` (include one FIT and one FILL photo), look at the wall, then run it unlimited. The derivative-based diff replaces each v1 placement with its v2 derivative, adds first, so the set never shrinks — about `set_size` uploads, once. | Canary photos look right on the TV; a baseline-style diff shows the same photo count with v2 sizes/mattes; the harvested edits (e.g. `MY_F0079` → `shadowbox_sage`) are re-applied. |
 | **M4 — UI + cleanup** | Gallery badges, details view, README. After a soak period (a week or two), purge v1 derivative rows/files. | Badges match `plan-report`; v1 purged. |

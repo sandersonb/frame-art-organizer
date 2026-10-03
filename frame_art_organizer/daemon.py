@@ -22,6 +22,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 
 from . import config, db, scheduler, store
+from . import harvest as harvest_mod
 from .frame_client import FrameAsleep, FrameClient
 
 log = logging.getLogger("frame_art_organizer.daemon")
@@ -34,6 +35,8 @@ class Daemon:
         self.paths = config.paths(cfg, base_dir)
         dcfg = cfg.get("daemon", {})
         self.tick = float(tick if tick is not None else dcfg.get("tick_seconds", 60))
+        # How often (while the TV is awake) to read back matte edits made on the TV; 0 = off.
+        self.harvest_interval = timedelta(minutes=float(dcfg.get("harvest_minutes", 15)))
         img = cfg.get("image", {})
         self.fit = img.get("default_fit", "cover")
         self.pv = int(img.get("pipeline_version", 1))
@@ -44,10 +47,16 @@ class Daemon:
         self._stop = threading.Event()
         self._applied_period: str | None = None
         self._last_refresh: datetime | None = None
+        self._last_harvest: datetime | None = None
         self._was_reachable: bool | None = None
 
     def stop(self) -> None:
         self._stop.set()
+
+    def _harvest_due(self, now: datetime) -> bool:
+        if self.harvest_interval.total_seconds() <= 0:
+            return False
+        return self._last_harvest is None or (now - self._last_harvest) >= self.harvest_interval
 
     def run(self) -> None:
         log.info("daemon started (tick=%ss, refresh every %s)", self.tick, self.refresh_interval)
@@ -72,7 +81,8 @@ class Daemon:
         due = (period["name"] != self._applied_period
                or self._last_refresh is None
                or (now - self._last_refresh) >= self.refresh_interval)
-        if not (due or woke):
+        harvest_due = self._harvest_due(now)
+        if not (due or woke or harvest_due):
             return  # awake, nothing to do this tick
 
         conn = db.open_db(self.paths["database"])
@@ -86,11 +96,20 @@ class Daemon:
                     )
                     self._applied_period = period["name"]
                     self._last_refresh = now
+                    self._last_harvest = now  # refresh harvests first, so this counts
                     log.info("refresh[%s] %s", period["name"], res)
-                elif woke:
-                    fc.set_slideshow(duration=period["interval"], shuffle=period["shuffle"])
-                    log.info("woke → re-asserted slideshow (%s, %sm shuffle=%s)",
-                             period["name"], period["interval"], period["shuffle"])
+                else:
+                    if woke:
+                        fc.set_slideshow(duration=period["interval"], shuffle=period["shuffle"])
+                        log.info("woke → re-asserted slideshow (%s, %sm shuffle=%s)",
+                                 period["name"], period["interval"], period["shuffle"])
+                    if harvest_due:
+                        # Attempt-based: a failing TV backs off to the next interval rather
+                        # than being retried every tick.
+                        self._last_harvest = now
+                        changes = harvest_mod.harvest(fc, conn, device_id)
+                        if changes:
+                            log.info("harvest: recorded %d matte edit(s) made on the TV", len(changes))
         except FrameAsleep as e:
             log.info("TV became unreachable mid-tick (%s); will retry", type(e).__name__)
         finally:

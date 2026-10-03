@@ -199,9 +199,18 @@ the current decision with `fao schedule-show`.
 [daemon]
 enabled = false          # `fao serve` is web-only unless this is true OR you pass --daemon
 tick_seconds = 60        # how often the loop checks reachability / whether a refresh is due
+harvest_minutes = 15     # while the TV is awake, how often to read back matte edits made on the TV
+                         #   (0 = off). See "Matte" below.
 ```
 Safe default: a plain `fao serve` won't touch your Frame. The systemd unit passes
 `--daemon` to enable the scheduler on the appliance.
+
+### Matte — change it on the TV
+The Frame's own Art-Mode menu is the matte editor, so this app doesn't have one. If you
+change a photo's matte on the TV, the app **reads it back** (`fao harvest`, also run
+automatically every `harvest_minutes` and at the start of every rotation) and remembers it
+per photo. The harvest always runs *before* a photo is rotated off the TV, because deleting a
+photo destroys its matte. `fao harvest --dry-run` shows what it would record.
 
 ---
 
@@ -218,7 +227,7 @@ Service   serve [--host --port --daemon/--no-daemon]   daemon [--tick]
 Library   db-init   ingest   assets   collections   collection-add <name>
           collection-assign <asset_id> <collection>   policy <asset_id> [--pin --suppress --weight W]
 Rotation  schedule-show            schedule-refresh
-Frame     ping   info   current   list   sync   reconcile   placements
+Frame     ping   info   current   list   sync   reconcile   placements   harvest [--dry-run]
           push <file> [--fit cover|contain --matte M --show]   show <content_id>   delete <content_id>
 ```
 Run `fao --help` (or `fao <cmd> --help`) for details.
