@@ -47,10 +47,16 @@ def get_asset(conn, asset_id) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM asset WHERE id = ?", (asset_id,)).fetchone()
 
 
-def get_any_derivative(conn, asset_id) -> sqlite3.Row | None:
+# Which derivative stands for a photo in the UI: the one at the configured pipeline if it exists
+# (so after a rollback the gallery shows what the TV shows), else the newest. The two `?` are
+# (fit_mode, pipeline_version); NULLs simply fall through to "newest".
+_PREFER_CURRENT = "ORDER BY (fit_mode = ? AND pipeline_version = ?) DESC, pipeline_version DESC"
+
+
+def get_any_derivative(conn, asset_id, fit_mode=None, pipeline_version=None) -> sqlite3.Row | None:
     return conn.execute(
-        "SELECT * FROM derivative WHERE asset_id = ? ORDER BY pipeline_version DESC LIMIT 1",
-        (asset_id,),
+        f"SELECT * FROM derivative WHERE asset_id = ? {_PREFER_CURRENT} LIMIT 1",
+        (asset_id, fit_mode, pipeline_version),
     ).fetchone()
 
 
@@ -67,8 +73,13 @@ _SORTS = {
 }
 
 
-def list_gallery(conn, filt: str = "all", sort: str = "newest") -> list[sqlite3.Row]:
-    """Filtered + sorted gallery rows. `filt`: all | none | broken | col:<id>."""
+def list_gallery(conn, filt: str = "all", sort: str = "newest",
+                 fit_mode=None, pipeline_version=None) -> list[sqlite3.Row]:
+    """Filtered + sorted gallery rows. `filt`: all | none | broken | col:<id>.
+
+    Each row also carries the geometry of its shown derivative (`d_id`, `d_width`, `d_height`,
+    `d_fit`, `d_pv` — NULL if none is rendered) and the matte preference harvested from the TV
+    (`pref_matte`, `pref_shape`), which is what the gallery badges are computed from."""
     where = ["a.status != 'deleted'"]
     params: list = []
     if filt == "broken":
@@ -81,14 +92,20 @@ def list_gallery(conn, filt: str = "all", sort: str = "newest") -> list[sqlite3.
         params.append(int(filt[4:]))
     order = _SORTS.get(sort, _SORTS["newest"])
     sql = f"""SELECT a.*,
-             (SELECT COUNT(*) FROM derivative d WHERE d.asset_id = a.id) AS derivatives,
+             (SELECT COUNT(*) FROM derivative x WHERE x.asset_id = a.id) AS derivatives,
              (SELECT GROUP_CONCAT(c.name, ', ')
                 FROM asset_collection ac JOIN collection c ON c.id = ac.collection_id
-               WHERE ac.asset_id = a.id) AS collections
+               WHERE ac.asset_id = a.id) AS collections,
+             d.id AS d_id, d.width AS d_width, d.height AS d_height,
+             d.fit_mode AS d_fit, d.pipeline_version AS d_pv,
+             ap.matte AS pref_matte, ap.matte_shape AS pref_shape
            FROM asset a
+           LEFT JOIN derivative d ON d.id = (
+               SELECT id FROM derivative WHERE asset_id = a.id {_PREFER_CURRENT} LIMIT 1)
+           LEFT JOIN asset_policy ap ON ap.asset_id = a.id
            WHERE {' AND '.join(where)}
            ORDER BY {order}"""
-    return conn.execute(sql, params).fetchall()
+    return conn.execute(sql, [fit_mode, pipeline_version] + params).fetchall()
 
 
 def counts_by_filter(conn) -> dict:
@@ -116,9 +133,67 @@ def rename_asset(conn, asset_id, title) -> None:
     conn.commit()
 
 
+# --- purging superseded derivatives (M4; see purge.py for the rules) -------------------------
+def superseded_derivatives(conn, fit_mode, pipeline_version) -> list[sqlite3.Row]:
+    """Derivatives that are not at the configured pipeline (nor from a newer one), whose photo has
+    one that is, and that no present/pending placement uses. Candidates only — purge.py decides."""
+    return conn.execute(
+        """SELECT old.id AS id, old.asset_id AS asset_id, old.path AS path,
+                  old.pipeline_version AS pipeline_version, old.fit_mode AS fit_mode,
+                  cur.path AS replacement_path, cur.rendered_at AS replacement_rendered_at
+           FROM derivative old
+           JOIN derivative cur ON cur.asset_id = old.asset_id
+                              AND cur.fit_mode = ? AND cur.pipeline_version = ?
+           WHERE NOT (old.fit_mode = ? AND old.pipeline_version = ?)
+             AND old.pipeline_version <= ?
+             AND NOT EXISTS (SELECT 1 FROM placement p WHERE p.derivative_id = old.id
+                             AND p.state IN ('present','pending'))
+           ORDER BY old.id""",
+        (fit_mode, pipeline_version, fit_mode, pipeline_version, pipeline_version),
+    ).fetchall()
+
+
+def stale_resident_count(conn, fit_mode, pipeline_version) -> int:
+    """Placements on the TV (or about to be) whose derivative is not at the configured pipeline."""
+    return conn.execute(
+        """SELECT COUNT(*) FROM placement p JOIN derivative d ON d.id = p.derivative_id
+           WHERE p.state IN ('present','pending')
+             AND NOT (d.fit_mode = ? AND d.pipeline_version = ?)""",
+        (fit_mode, pipeline_version),
+    ).fetchone()[0]
+
+
+def newer_derivative_count(conn, pipeline_version) -> int:
+    return conn.execute("SELECT COUNT(*) FROM derivative WHERE pipeline_version > ?",
+                        (pipeline_version,)).fetchone()[0]
+
+
+def purge_derivative(conn, derivative_id) -> int:
+    """Delete a derivative row and its dead placement history; returns how many history rows went.
+    Refuses (ValueError) if anything present or pending uses it. Does NOT commit or touch files.
+
+    The FK from placement has no cascade; non-present placements are history only (the real
+    history, rotation_event, is keyed by asset and is untouched)."""
+    live = conn.execute("SELECT COUNT(*) FROM placement WHERE derivative_id = ? "
+                        "AND state IN ('present','pending')", (derivative_id,)).fetchone()[0]
+    if live:
+        raise ValueError(f"derivative {derivative_id} is in use by {live} placement(s)")
+    n = conn.execute("DELETE FROM placement WHERE derivative_id = ?", (derivative_id,)).rowcount
+    conn.execute("DELETE FROM derivative WHERE id = ?", (derivative_id,))
+    return n
+
+
+def get_matte_pref(conn, asset_id) -> tuple:
+    """(matte, matte_shape) the user chose on the TV for this asset, or (None, None)."""
+    r = conn.execute("SELECT matte, matte_shape FROM asset_policy WHERE asset_id = ?", (asset_id,)).fetchone()
+    return (r["matte"], r["matte_shape"]) if r else (None, None)
+
+
 def present_placements_for_asset(conn, asset_id) -> list[sqlite3.Row]:
     return conn.execute(
-        """SELECT p.id, p.content_id, p.device_id
+        """SELECT p.id, p.content_id, p.device_id, p.matte AS matte,
+                  d.width AS width, d.height AS height,
+                  d.fit_mode AS fit_mode, d.pipeline_version AS pipeline_version
            FROM placement p JOIN derivative d ON d.id = p.derivative_id
            WHERE d.asset_id = ? AND p.state = 'present'""",
         (asset_id,),

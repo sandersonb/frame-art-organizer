@@ -70,7 +70,9 @@
     .card.menu-open { z-index: 30; }
     .card.selected { outline: 2px solid var(--accent); outline-offset: -1px; }
     .card .thumb { position: relative; }
-    .card .thumb img { width: 100%; aspect-ratio: 16/10; object-fit: cover; background: #0c0d11;
+    /* Show the photo as the TV will: whole (`contain`) in a 16:9 frame on a dark ground, which is
+       what a FIT photo in a matte looks like. `cover` would crop it and hide the point. */
+    .card .thumb img { width: 100%; aspect-ratio: 16/9; object-fit: contain; background: #0c0d11;
                        display: block; border-radius: 12px 12px 0 0; }
     .card .chk { position: absolute; top: 10px; left: 10px; width: 26px; height: 26px;
                  border-radius: 7px; border: 2px solid rgba(255,255,255,.85);
@@ -93,6 +95,12 @@
            background: color-mix(in srgb, var(--c) 20%, var(--surface));
            color: color-mix(in srgb, var(--c) 80%, white);
            border: 1px solid color-mix(in srgb, var(--c) 35%, transparent); }
+    .tags.looks { margin-bottom: 5px; }
+    .tag.k-crop, .tag.k-tvcrop { --c: #f59e0b; }
+    .tag.k-fit { --c: #38bdf8; }
+    .tag.k-bars { --c: #a78bfa; }
+    .tag.k-lowres { --c: #f97316; }
+    .tag.k-pending { --c: #8a90a0; }
     .tagx { background: transparent; border: 0; color: inherit; opacity: .55; font-size: 14px;
             line-height: 1; padding: 0; }
     .tagx:hover { opacity: 1; }
@@ -132,12 +140,15 @@
     .modal { background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
              width: min(520px, 100%); max-height: 88vh; overflow: auto; padding: 18px; }
     .modal.small { width: min(360px, 100%); }
-    .modal-img { width: 100%; border-radius: 10px; aspect-ratio: 16/10; object-fit: cover;
+    .modal-img { width: 100%; border-radius: 10px; aspect-ratio: 16/9; object-fit: contain;
                  background: #0c0d11; margin-bottom: 12px; }
     .kv { display: flex; justify-content: space-between; gap: 16px; padding: 6px 0;
           border-top: 1px solid var(--border); font-size: 13.5px; }
     .kv > span:first-child { color: var(--muted); }
     .kv .mono { font-family: ui-monospace, monospace; }
+    .kv > span:last-child { text-align: right; }
+    .modal .hint { margin: 2px 0 6px; font-size: 12px; color: var(--muted); }
+    .modal .tags.looks { margin: 6px 0 4px; }
     .modal .btn { margin-top: 14px; }
     .field { width: 100%; background: var(--bg); border: 1px solid var(--border);
              border-radius: 8px; padding: 9px 11px; margin-bottom: 12px; }
@@ -221,17 +232,35 @@
     <div class="modal" @click.stop x-show="details">
       <template x-if="details">
         <div>
-          <img class="modal-img" :src="`/thumb/${details.id}`" alt="">
+          <img class="modal-img" :src="`/thumb/${details.id}?v=${details.derivative_id || 0}`" alt="">
           <h3 x-text="details.title || details.original_name"></h3>
           <div class="kv"><span>File</span><span x-text="details.original_name"></span></div>
           <div class="kv"><span>Dimensions</span>
             <span x-text="details.width ? `${details.width} × ${details.height}` : '—'"></span></div>
+          <div class="tags looks" x-show="details.badges.length">
+            <template x-for="b in details.badges" :key="b.text">
+              <span class="tag" :class="`k-${b.kind}`" :title="b.title" x-text="b.text"></span>
+            </template>
+          </div>
+          <div class="kv"><span>Rendered</span>
+            <span x-text="details.render
+              ? `${details.render.width} × ${details.render.height} · ${details.render.pipeline}${details.render.current ? '' : ' (old pipeline — replaced on the next refresh)'}`
+              : 'Not rendered yet'"></span></div>
+          <div class="kv" x-show="details.plan"><span>Plan</span>
+            <span x-text="details.plan && details.plan.text"></span></div>
+          <div class="kv"><span>Matte</span><span x-text="details.matte.text"></span></div>
+          <p class="hint">The matte is chosen on the TV itself; the app reads it back and remembers it.</p>
           <div class="kv"><span>Taken</span><span x-text="details.captured_at || '—'"></span></div>
           <div class="kv"><span>Imported</span><span x-text="details.imported_at"></span></div>
           <div class="kv"><span>Size</span>
             <span x-text="details.bytes ? Math.round(details.bytes/1024) + ' KB' : '—'"></span></div>
           <div class="kv"><span>On Frame</span>
-            <span x-text="details.on_frame.length ? details.on_frame.join(', ') : 'Not resident'"></span></div>
+            <span>
+              <span x-show="!details.on_tv.length">Not resident</span>
+              <template x-for="p in details.on_tv" :key="p.content_id">
+                <div x-text="`${p.content_id} · ${p.matte} · ${p.width} × ${p.height} · ${p.pipeline}${p.current ? '' : ' (old)'}`"></div>
+              </template>
+            </span></div>
           <div class="kv"><span>Collections</span>
             <span x-text="details.collections.map(c => c.name).join(', ') || '—'"></span></div>
           <div class="kv"><span>SHA-256</span>

@@ -122,7 +122,8 @@ database    = "data/state.db"    # the SQLite store
 ```
 Primary ingest is the web UI's upload; the `inbox` folder is an optional secondary path.
 On a Pi you'd typically point these at persistent storage (e.g. `/srv/frame/...`).
-Web thumbnails are cached next to `derivatives` in a `thumbs/` dir.
+Web thumbnails are cached next to `derivatives` in a `thumbs/` dir (regenerable; keyed by the
+render they were made from).
 
 ### `[image]` — how photos are rendered
 ```toml
@@ -224,6 +225,17 @@ automatically every `harvest_minutes` and at the start of every rotation) and re
 per photo. The harvest always runs *before* a photo is rotated off the TV, because deleting a
 photo destroys its matte. `fao harvest --dry-run` shows what it would record.
 
+### Purging old renders after the migration
+Switching pipeline leaves the old renders on disk (that is what makes a rollback instant).
+Once the new ones have soaked, `fao purge-derivatives` shows what it would delete — the old
+pipeline's files, which at 3840×2160 are most of the library's disk use — and
+`fao purge-derivatives --apply` deletes them. It never deletes a render whose photo has no
+replacement on disk, anything younger than `--min-age-days` (default 14, the soak), anything
+the TV holds or is about to receive, or anything from a *newer* pipeline than the one
+configured (so a rollback doesn't purge what you rolled back from). It refuses outright while
+photos on the TV are still on an old pipeline. Originals are never touched, so a rollback
+after a purge costs a re-render, not data.
+
 ---
 
 ## The web UI
@@ -233,14 +245,21 @@ per-photo menu (add to collection, rename, view details, download, delete), colo
 **collections** with a swatch picker, and multi-select **bulk** add/delete. Deleting a
 photo removes it from the Frame too.
 
+Each card says how the photo will look on the Frame — **cropped 16 %**, **fit · flexible_black**
+(kept whole inside a matte), **low-res 800×600**, **not rendered yet** — and previews show the
+photo whole, as the TV will. They are informational: nothing blocks an upload. *View details*
+shows the render (size, pipeline), the plan, the matte (and whether it was chosen on the TV or
+is the default), and what is on the TV — read-only, since the matte is edited on the TV.
+
 ## The `fao` CLI
 ```
 Service   serve [--host --port --daemon/--no-daemon]   daemon [--tick]
 Library   db-init   ingest   assets   collections   collection-add <name>
           collection-assign <asset_id> <collection>   policy <asset_id> [--pin --suppress --weight W]
-Rotation  schedule-show            schedule-refresh
+Rotation  schedule-show            schedule-refresh [--limit N]   plan-report [--crop-tolerance X]
 Frame     ping   info   current   list   sync   reconcile   placements   harvest [--dry-run]
           push <file> [--fit cover|contain --matte M --show]   show <content_id>   delete <content_id>
+Cleanup   purge-derivatives [--apply] [--min-age-days N]
 ```
 Run `fao --help` (or `fao <cmd> --help`) for details.
 
@@ -252,7 +271,11 @@ frame_art_organizer/
   config.py        config.toml loader (+ schedule period selection)
   db.py            SQLite connection + schema migrations
   store.py         repository layer (assets, collections, placements, selection query)
-  images.py        any image → 3840x2160 JPEG; EXIF date + thumbnails
+  images.py        render plan (native size, never upscaled); EXIF date + thumbnails
+  mattes.py        the TV's matte vocabulary; which matte to upload (matte_for)
+  badges.py        what a photo looks like on the Frame: gallery badges + details view
+  harvest.py       read matte edits back from the TV
+  purge.py         delete superseded renders after the soak (guarded)
   ingest.py        scan/upload → assets → derivatives
   frame_client.py  reachability-gated, timeout-bounded Art API wrapper
   scheduler.py     compose the working set + reconcile the TV + set the slideshow

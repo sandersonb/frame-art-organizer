@@ -567,7 +567,8 @@ ALTER TABLE asset_policy ADD COLUMN matte_shape TEXT;   -- 'wide' | 'odd'
 ```
 No change to `derivative` (v2 uses `fit_mode='auto'` and real `width/height`) or
 `placement`. v2 derivatives are new rows (`pipeline_version = 2`); v1 rows/files stay until
-purged (M4), which is also the rollback path. An `asset_policy` row may not exist yet →
+purged (M4): until then a rollback is instant; after `fao purge-derivatives --apply` it re-renders
+from the archived originals instead. An `asset_policy` row may not exist yet →
 `INSERT OR IGNORE`, then `UPDATE` (as `store.set_policy` already does).
 
 ### 12.6 Config
@@ -586,8 +587,9 @@ See §7 `[image]`. New keys: `crop_tolerance`, `auto_matte`, `fit_matte_type`,
 | `uploader.py` | `sync` uses `matte_for`; `reconcile` calls harvest. |
 | `frame_client.py` | `upload_jpeg` always sends `portrait_matte="none"` and validates the matte string; treat `ConnectionFailure` as transient (retry once or twice — another client's `clientDisconnect` can arrive first, API notes §8); on a bounded-call timeout close the websocket instead of abandoning the worker (the bounded call is itself the probe). **Found and fixed in M2:** `close()` closed only the remote socket — `tv.art()` builds a *separate* socket that was never closed (and a worker blocked in `recv()` kept it alive), a suspect for the wedged API (API notes §8). |
 | `daemon.py` | Call `render_pending` at the top of each due refresh (today only the web upload and `fao ingest` render); slow harvest tick; drop the single global `self.matte`; treat "awake but the art API doesn't answer" (art call times out) like asleep → skip and retry. |
-| `web.py` / templates | Gallery badge per photo (“cropped 15 %”, “fit with matte”, “low-res 800×600”) from stored dimensions — non-blocking, no warning dialogs; details view shows plan + matte read-only. Thumbnails already come from the derivative, so FIT photos preview whole. |
-| `cli.py` | `fao harvest`; `fao plan-report` (dry run: per asset → trim, plan, output size, matte); `schedule-refresh --limit N`; `push` uses the plan + matte guard. |
+| `web.py` / templates / `badges.py` *(new)* | **Built (M4).** Gallery badge per photo (“cropped 16 %”, “fit · flexible_black”, “cropped 25 % by the TV”, “low-res 800×600”, “not rendered yet”) derived from the derivative that is actually rendered — truthful under v1 and v2 — non-blocking, no warning dialogs; the details view shows render, plan, matte (and why a TV choice isn't applied) and what is on the TV, read-only. **Correction:** thumbnails did *not* already preview FIT photos whole — the cache was keyed by the photo alone (a v1 cropped preview would have outlived the migration) and the CSS used `object-fit: cover`; both fixed (cache keyed by derivative, `contain` in a 16:9 box). |
+| `cli.py` | `fao harvest`; `fao plan-report` (dry run: per asset → trim, plan, output size, matte); `schedule-refresh --limit N`; `push` uses the plan + matte guard; `purge-derivatives` (M4). |
+| `purge.py` *(new)* | **Built (M4).** Delete superseded derivatives after the soak. Candidates: not at the configured pipeline and not from a newer one; the photo has a replacement whose file exists and is ≥ `--min-age-days` old; nothing present/pending uses it; the file is inside the derivatives dir. Refused while the TV holds an old render. Rows (with their dead placement history) go in one transaction, files after. Also sweeps unreferenced thumbnails. |
 | `db.py` | `_V3` migration. |
 | `tests/` *(new)* | See §12.10; add a `dev` extra with `pytest`. |
 | `README.md`, `config.toml` | Document the new keys; update the `[image]` text. |
@@ -614,7 +616,7 @@ rendering.
 | **M1 — Harvest only** — **BUILT** on branch `m1-matte-harvest` (58 tests; ships when merged and deployed to the Pi) | Migration 3, `store.harvest_mattes`, wired into `reconcile`, the top of `refresh`, and a daemon tick; `fao harvest`. Rendering untouched. | On the Pi, `fao harvest` records exactly the edits present at that time — as of 2026-10-02 three: `MY_F0083` and `MY_F0071` → `modernthin_black`, `MY_F0079` → `shadowbox_sage` (all shape `wide`); a second run reports none. TV unchanged (read-only). |
 | **M2 — v2 code, dormant** — **BUILT** on branch `m2-render-plan` (188 tests; ships when merged and deployed) | `images.plan_render`, `mattes.py`, scheduler/uploader changes, tests. Config stays `cover` / `pipeline_version = 1`. `matte_for` is live: v1 derivatives are all 16:9 (`wide`) → preference-or-`none`, i.e. today's behavior **plus** honoring harvested preferences and `portrait_matte = none`. | Tests green; `fao plan-report` on the real library shows the FILL/FIT split with no surprises; an attended `schedule-refresh` behaves exactly as today, except that any newly uploaded photo uses its harvested matte preference. |
 | **M3 — Flip to v2** — tooling + rehearsal **BUILT**; **live rehearsal on the real TV PASSED 2026-10-02** with six synthetic photos (API notes §7.12); the canary on the real library is still attended: runbook §12.12 | Set `default_fit = "auto"`, `pipeline_version = 2`. Render all derivatives (daemon or `fao ingest`) **before** the first v2 refresh — selection only sees `(fit_mode, pipeline_version)` matches, so an unrendered library would look empty and the empty-set guard would skip. Then an **attended canary**: `schedule-refresh --limit 3` (include one FIT and one FILL photo), look at the wall, then run it unlimited. The derivative-based diff replaces each v1 placement with its v2 derivative, adds first, so the set never shrinks — about `set_size` uploads, once. | Canary photos look right on the TV; a baseline-style diff shows the same photo count with v2 sizes/mattes; the harvested edits (e.g. `MY_F0079` → `shadowbox_sage`) are re-applied. |
-| **M4 — UI + cleanup** | Gallery badges, details view, README. After a soak period (a week or two), purge v1 derivative rows/files. | Badges match `plan-report`; v1 purged. |
+| **M4 — UI + cleanup** — **BUILT** (263 tests; the purge itself is a later, attended step) | Gallery badges, details view, previews that show the whole photo, README; `fao purge-derivatives` for after the soak (a week or two). | Badges match `plan-report` — **a test** (ten shapes really rendered, kind / crop % / matte / low-res compared). Looked at in a real browser: grid, list and details modals, no JS errors. v1 purged — **pending the soak on the Pi**, then `fao purge-derivatives` (dry run first). |
 
 **Operational prerequisites (learned 2026-10-02).**
 - **Wedged API:** if art calls hang while the TV is awake and showing art, power-cycle the
@@ -631,7 +633,9 @@ rendering.
 back to the retained v1 derivatives. Stored matte preferences are harmless (shape-scoped).
 If auto-matte misbehaves, set `auto_matte = false` without rolling pixels back. If the TV
 shows the 40000 dialog: power-cycle, then `fao delete <content_id>` for the offender (the
-guards should prevent it). Don't purge v1 until M4's soak ends.
+guards should prevent it). Don't purge v1 until the soak ends: `fao purge-derivatives` enforces
+`--min-age-days` (default 14) and refuses while the TV holds an old render. After a purge, a
+rollback re-renders from the originals (minutes on the Pi) instead of being instant.
 
 ### 12.9 Risks & mitigations
 | Risk | Mitigation |
@@ -639,6 +643,7 @@ guards should prevent it). Don't purge v1 until M4's soak ends.
 | A matte/shape mismatch crashes the TV (known) | Shape-scoped preferences; config validation against `ODD_ALLOWED`; string validation in `upload_jpeg`; M0 gate; `auto_matte` kill switch; attended canary |
 | Art API wedged while the TV looks fine (calls hang; only a media-box power-cycle fixes it); another client's `clientDisconnect` can abort a connect | Bounded calls (already `FrameTimeout`, treated like asleep); close sockets on timeout; retry `ConnectionFailure` once or twice; probe `artmode` first |
 | Pi can't connect after the TV's access mode is changed to prompting | Verify `FrameArtOrganizer` is on the allowed list before restarting the daemon (§12.8 prerequisites) |
+| Purge deletes a render that is still needed | Dry run by default; only photos with a replacement on disk, past the soak, unused by the TV, from an older pipeline than configured, inside the derivatives dir; refused mid-migration; DB first, files after; originals never touched (§12.12 step 7) |
 | User's TV edit lost to eviction | Harvest-first; *no harvest, no evict*; slow daemon harvest tick |
 | A matte edit lost when a photo is re-uploaded in the same run it was edited | Preferences are read **after** the harvest (a bug the M3 rehearsal found and fixed: the plan had copied stale ones) |
 | Harvest false positives (firmware reports `''`/`None` for none) | Normalize to `none` before comparing; M1's second run must be a no-op |
@@ -724,12 +729,18 @@ photos, with native sizes (no more 3840×2160 for small photos) and the mattes t
 
 **6. Resume** — `sudo systemctl start frame-art-organizer`. Its first refresh is now a no-op.
 
+**7. After the soak (a week or two)** — `fao purge-derivatives` shows what it would delete (the old
+pipeline's renders and unused thumbnails); `fao purge-derivatives --apply` deletes it. The command
+refuses while the TV still holds an old render and keeps anything younger than `--min-age-days`.
+This is the one step that ends the instant rollback — do it only when you are happy with v2.
+
 **What to expect**
 - A matte you chose on the TV carries over **only if the photo stays 16:9**. For a photo that
   becomes whole (FIT) the choice was made on the cropped 16:9 version, so it is dropped and the
   default is used — by design: the TV offers different mattes per shape, and a mismatched one can
   crash it. You can re-pick on the TV; the harvest remembers.
-- The v1 derivative files stay on disk until M4 purges them — that is what makes rollback instant.
+- The v1 derivative files stay on disk until you run `fao purge-derivatives --apply` (step 7) — that
+  is what makes rollback instant. After a purge a rollback re-renders from the originals.
 - **Verified on the real TV (2026-10-02):** before deleting the photo that is on the wall, the
   refresh shows a surviving one with `select(show=False)` (only in Art Mode). Observed: a smooth,
   barely noticeable replace — no flicker, blank or dialog. The TV's slideshow keeps rotating on its

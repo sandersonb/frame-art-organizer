@@ -14,7 +14,7 @@ import jinja2
 from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
-from . import config, db, images, ingest, store
+from . import badges, config, db, images, ingest, store
 from .frame_client import FrameAsleep, FrameClient
 
 _ENV = jinja2.Environment(
@@ -34,7 +34,7 @@ def create_app(config_path: str | None = None, run_daemon: bool | None = None) -
     paths = config.paths(cfg, base)
     for key in ("inbox", "originals", "derivatives"):
         paths[key].mkdir(parents=True, exist_ok=True)
-    thumbs_dir = paths["derivatives"].parent / "thumbs"
+    thumbs_dir = config.thumbs_dir(paths)
     thumbs_dir.mkdir(parents=True, exist_ok=True)
     _boot = db.open_db(paths["database"])  # ensure migrated
     store.ensure_collection_colors(_boot)  # backfill colors for pre-migration collections
@@ -80,12 +80,18 @@ def create_app(config_path: str | None = None, run_daemon: bool | None = None) -
                 pass  # leave placements; the scheduler evicts on next refresh
         store.mark_asset_deleted(c, asset_id)
 
+    def look_of(a) -> badges.Look:
+        """The photo's badges, from its source size, shown derivative and harvested matte."""
+        return badges.describe(a["width"], a["height"], a["d_width"], a["d_height"], a["d_fit"],
+                               a["pref_matte"], a["pref_shape"], img)
+
     def gallery_assets(c, filt, sort):
-        """Gallery rows with their collections (name+color) attached for tag rendering."""
+        """Gallery rows with their collections (name+color) and badges attached for rendering."""
         out = []
-        for a in store.list_gallery(c, filt, sort):
+        for a in store.list_gallery(c, filt, sort, fit, pipeline_version):
             d = dict(a)
             d["collections"] = [dict(x) for x in store.collections_for_asset(c, a["id"])]
+            d["look"] = look_of(a)
             out.append(d)
         return out
 
@@ -164,12 +170,12 @@ def create_app(config_path: str | None = None, run_daemon: bool | None = None) -
         c = conn()
         try:
             a = store.get_asset(c, asset_id)
-            deriv = store.get_any_derivative(c, asset_id) if a else None
+            deriv = store.get_any_derivative(c, asset_id, fit, pipeline_version) if a else None
         finally:
             c.close()
         if a is None:
             raise HTTPException(404)
-        dest = thumbs_dir / f"{a['sha256']}.jpg"
+        dest = thumbs_dir / images.thumb_name(a["sha256"], deriv["id"] if deriv else None)
         if not dest.exists():
             src = deriv["path"] if deriv else a["original_path"]
             try:
@@ -213,18 +219,21 @@ def create_app(config_path: str | None = None, run_daemon: bool | None = None) -
             a = store.get_asset(c, asset_id)
             if a is None:
                 raise HTTPException(404)
-            deriv = store.get_any_derivative(c, asset_id)
+            deriv = store.get_any_derivative(c, asset_id, fit, pipeline_version)
             cols = [dict(r) for r in store.collections_for_asset(c, asset_id)]
             placements = store.present_placements_for_asset(c, asset_id)
+            pref_matte, pref_shape = store.get_matte_pref(c, asset_id)
         finally:
             c.close()
         return {
+            **badges.details(a, deriv, pref_matte, pref_shape, placements, img),
             "id": a["id"], "original_name": a["original_name"], "title": a["title"],
             "status": a["status"], "width": a["width"], "height": a["height"],
             "bytes": a["bytes"], "mime": a["mime"], "captured_at": a["captured_at"],
             "imported_at": a["imported_at"], "sha256": a["sha256"], "collections": cols,
             "on_frame": [p["content_id"] for p in placements],
             "has_derivative": deriv is not None,
+            "derivative_id": deriv["id"] if deriv else None,
         }
 
     @app.get("/asset/{asset_id}/download")
