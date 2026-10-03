@@ -57,11 +57,12 @@ def scan(conn: sqlite3.Connection, paths: dict) -> dict:
 
 
 def render_pending(conn: sqlite3.Connection, paths: dict, fit_mode: str,
-                   pipeline_version: int, quality: int) -> int:
+                   pipeline_version: int, quality: int, crop_tolerance: float = 0.16) -> int:
     rendered = 0
     for a in store.assets_needing_render(conn, fit_mode, pipeline_version):
         dest = Path(paths["derivatives"]) / f"{a['sha256']}_{fit_mode}_v{pipeline_version}.jpg"
-        info = images.render_to_file(a["original_path"], dest, mode=fit_mode, quality=quality)
+        info = images.render_to_file(a["original_path"], dest, mode=fit_mode, quality=quality,
+                                     crop_tolerance=crop_tolerance)
         store.add_derivative(
             conn, asset_id=a["id"], path=str(dest), sha256=info["sha256"],
             fit_mode=fit_mode, width=info["width"], height=info["height"],
