@@ -47,10 +47,16 @@ def get_asset(conn, asset_id) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM asset WHERE id = ?", (asset_id,)).fetchone()
 
 
-def get_any_derivative(conn, asset_id) -> sqlite3.Row | None:
+# Which derivative stands for a photo in the UI: the one at the configured pipeline if it exists
+# (so after a rollback the gallery shows what the TV shows), else the newest. The two `?` are
+# (fit_mode, pipeline_version); NULLs simply fall through to "newest".
+_PREFER_CURRENT = "ORDER BY (fit_mode = ? AND pipeline_version = ?) DESC, pipeline_version DESC"
+
+
+def get_any_derivative(conn, asset_id, fit_mode=None, pipeline_version=None) -> sqlite3.Row | None:
     return conn.execute(
-        "SELECT * FROM derivative WHERE asset_id = ? ORDER BY pipeline_version DESC LIMIT 1",
-        (asset_id,),
+        f"SELECT * FROM derivative WHERE asset_id = ? {_PREFER_CURRENT} LIMIT 1",
+        (asset_id, fit_mode, pipeline_version),
     ).fetchone()
 
 
@@ -67,8 +73,13 @@ _SORTS = {
 }
 
 
-def list_gallery(conn, filt: str = "all", sort: str = "newest") -> list[sqlite3.Row]:
-    """Filtered + sorted gallery rows. `filt`: all | none | broken | col:<id>."""
+def list_gallery(conn, filt: str = "all", sort: str = "newest",
+                 fit_mode=None, pipeline_version=None) -> list[sqlite3.Row]:
+    """Filtered + sorted gallery rows. `filt`: all | none | broken | col:<id>.
+
+    Each row also carries the geometry of its shown derivative (`d_id`, `d_width`, `d_height`,
+    `d_fit`, `d_pv` — NULL if none is rendered) and the matte preference harvested from the TV
+    (`pref_matte`, `pref_shape`), which is what the gallery badges are computed from."""
     where = ["a.status != 'deleted'"]
     params: list = []
     if filt == "broken":
@@ -81,14 +92,20 @@ def list_gallery(conn, filt: str = "all", sort: str = "newest") -> list[sqlite3.
         params.append(int(filt[4:]))
     order = _SORTS.get(sort, _SORTS["newest"])
     sql = f"""SELECT a.*,
-             (SELECT COUNT(*) FROM derivative d WHERE d.asset_id = a.id) AS derivatives,
+             (SELECT COUNT(*) FROM derivative x WHERE x.asset_id = a.id) AS derivatives,
              (SELECT GROUP_CONCAT(c.name, ', ')
                 FROM asset_collection ac JOIN collection c ON c.id = ac.collection_id
-               WHERE ac.asset_id = a.id) AS collections
+               WHERE ac.asset_id = a.id) AS collections,
+             d.id AS d_id, d.width AS d_width, d.height AS d_height,
+             d.fit_mode AS d_fit, d.pipeline_version AS d_pv,
+             ap.matte AS pref_matte, ap.matte_shape AS pref_shape
            FROM asset a
+           LEFT JOIN derivative d ON d.id = (
+               SELECT id FROM derivative WHERE asset_id = a.id {_PREFER_CURRENT} LIMIT 1)
+           LEFT JOIN asset_policy ap ON ap.asset_id = a.id
            WHERE {' AND '.join(where)}
            ORDER BY {order}"""
-    return conn.execute(sql, params).fetchall()
+    return conn.execute(sql, [fit_mode, pipeline_version] + params).fetchall()
 
 
 def counts_by_filter(conn) -> dict:

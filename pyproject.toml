@@ -21,7 +21,7 @@ web = [
     "python-multipart>=0.0.9",
 ]
 # Tests: `pip install -e '.[dev]'` then `pytest`. No TV needed.
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "httpx2"]   # httpx2: Starlette's TestClient (web tests skip without it)
 
 [project.scripts]
 fao = "frame_art_organizer.cli:main"

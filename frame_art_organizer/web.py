@@ -14,7 +14,7 @@ import jinja2
 from fastapi import FastAPI, File, Form, HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
-from . import config, db, images, ingest, store
+from . import badges, config, db, images, ingest, store
 from .frame_client import FrameAsleep, FrameClient
 
 _ENV = jinja2.Environment(
@@ -80,12 +80,18 @@ def create_app(config_path: str | None = None, run_daemon: bool | None = None) -
                 pass  # leave placements; the scheduler evicts on next refresh
         store.mark_asset_deleted(c, asset_id)
 
+    def look_of(a) -> badges.Look:
+        """The photo's badges, from its source size, shown derivative and harvested matte."""
+        return badges.describe(a["width"], a["height"], a["d_width"], a["d_height"], a["d_fit"],
+                               a["pref_matte"], a["pref_shape"], img)
+
     def gallery_assets(c, filt, sort):
-        """Gallery rows with their collections (name+color) attached for tag rendering."""
+        """Gallery rows with their collections (name+color) and badges attached for rendering."""
         out = []
-        for a in store.list_gallery(c, filt, sort):
+        for a in store.list_gallery(c, filt, sort, fit, pipeline_version):
             d = dict(a)
             d["collections"] = [dict(x) for x in store.collections_for_asset(c, a["id"])]
+            d["look"] = look_of(a)
             out.append(d)
         return out
 

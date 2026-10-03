@@ -45,6 +45,11 @@
   <div class="meta">
     <div class="name" title="{{ a.original_name }}">{{ a.title or a.original_name }}</div>
     <div class="date">{{ a.captured_at or 'No date' }}</div>
+    {% if a.look.badges %}
+    <div class="tags looks">
+      {% for b in a.look.badges %}<span class="tag k-{{ b.kind }}" title="{{ b.title }}">{{ b.text }}</span>{% endfor %}
+    </div>
+    {% endif %}
     <div class="tags">
       {% if a.status == 'broken' %}<span class="tag" style="--c:#ef4444">broken</span>{% endif %}
       {% for c in a.collections %}
