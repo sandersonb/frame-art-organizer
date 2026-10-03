@@ -146,6 +146,9 @@
           border-top: 1px solid var(--border); font-size: 13.5px; }
     .kv > span:first-child { color: var(--muted); }
     .kv .mono { font-family: ui-monospace, monospace; }
+    .kv > span:last-child { text-align: right; }
+    .modal .hint { margin: 2px 0 6px; font-size: 12px; color: var(--muted); }
+    .modal .tags.looks { margin: 6px 0 4px; }
     .modal .btn { margin-top: 14px; }
     .field { width: 100%; background: var(--bg); border: 1px solid var(--border);
              border-radius: 8px; padding: 9px 11px; margin-bottom: 12px; }
@@ -234,12 +237,30 @@
           <div class="kv"><span>File</span><span x-text="details.original_name"></span></div>
           <div class="kv"><span>Dimensions</span>
             <span x-text="details.width ? `${details.width} × ${details.height}` : '—'"></span></div>
+          <div class="tags looks" x-show="details.badges.length">
+            <template x-for="b in details.badges" :key="b.text">
+              <span class="tag" :class="`k-${b.kind}`" :title="b.title" x-text="b.text"></span>
+            </template>
+          </div>
+          <div class="kv"><span>Rendered</span>
+            <span x-text="details.render
+              ? `${details.render.width} × ${details.render.height} · ${details.render.pipeline}${details.render.current ? '' : ' (old pipeline — replaced on the next refresh)'}`
+              : 'Not rendered yet'"></span></div>
+          <div class="kv" x-show="details.plan"><span>Plan</span>
+            <span x-text="details.plan && details.plan.text"></span></div>
+          <div class="kv"><span>Matte</span><span x-text="details.matte.text"></span></div>
+          <p class="hint">The matte is chosen on the TV itself; the app reads it back and remembers it.</p>
           <div class="kv"><span>Taken</span><span x-text="details.captured_at || '—'"></span></div>
           <div class="kv"><span>Imported</span><span x-text="details.imported_at"></span></div>
           <div class="kv"><span>Size</span>
             <span x-text="details.bytes ? Math.round(details.bytes/1024) + ' KB' : '—'"></span></div>
           <div class="kv"><span>On Frame</span>
-            <span x-text="details.on_frame.length ? details.on_frame.join(', ') : 'Not resident'"></span></div>
+            <span>
+              <span x-show="!details.on_tv.length">Not resident</span>
+              <template x-for="p in details.on_tv" :key="p.content_id">
+                <div x-text="`${p.content_id} · ${p.matte} · ${p.width} × ${p.height} · ${p.pipeline}${p.current ? '' : ' (old)'}`"></div>
+              </template>
+            </span></div>
           <div class="kv"><span>Collections</span>
             <span x-text="details.collections.map(c => c.name).join(', ') || '—'"></span></div>
           <div class="kv"><span>SHA-256</span>

@@ -133,9 +133,17 @@ def rename_asset(conn, asset_id, title) -> None:
     conn.commit()
 
 
+def get_matte_pref(conn, asset_id) -> tuple:
+    """(matte, matte_shape) the user chose on the TV for this asset, or (None, None)."""
+    r = conn.execute("SELECT matte, matte_shape FROM asset_policy WHERE asset_id = ?", (asset_id,)).fetchone()
+    return (r["matte"], r["matte_shape"]) if r else (None, None)
+
+
 def present_placements_for_asset(conn, asset_id) -> list[sqlite3.Row]:
     return conn.execute(
-        """SELECT p.id, p.content_id, p.device_id
+        """SELECT p.id, p.content_id, p.device_id, p.matte AS matte,
+                  d.width AS width, d.height AS height,
+                  d.fit_mode AS fit_mode, d.pipeline_version AS pipeline_version
            FROM placement p JOIN derivative d ON d.id = p.derivative_id
            WHERE d.asset_id = ? AND p.state = 'present'""",
         (asset_id,),

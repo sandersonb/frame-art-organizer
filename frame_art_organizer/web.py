@@ -222,9 +222,11 @@ def create_app(config_path: str | None = None, run_daemon: bool | None = None) -
             deriv = store.get_any_derivative(c, asset_id, fit, pipeline_version)
             cols = [dict(r) for r in store.collections_for_asset(c, asset_id)]
             placements = store.present_placements_for_asset(c, asset_id)
+            pref_matte, pref_shape = store.get_matte_pref(c, asset_id)
         finally:
             c.close()
         return {
+            **badges.details(a, deriv, pref_matte, pref_shape, placements, img),
             "id": a["id"], "original_name": a["original_name"], "title": a["title"],
             "status": a["status"], "width": a["width"], "height": a["height"],
             "bytes": a["bytes"], "mime": a["mime"], "captured_at": a["captured_at"],
