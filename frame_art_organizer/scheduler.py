@@ -106,6 +106,7 @@ def refresh(client: FrameClient, conn: sqlite3.Connection, *, device_id, period,
         )
         return {"desired": 0, "added": 0, "removed": 0, "errors": 0, "skipped": "empty-set",
                 "harvested": 0, "removals_skipped": False, "pending_adds": 0, "mattes_used": {},
+                "uploads": [],
                 "interval": period["interval"], "shuffle": period["shuffle"]}
 
     added = removed = errors = 0
@@ -133,6 +134,7 @@ def refresh(client: FrameClient, conn: sqlite3.Connection, *, device_id, period,
     adds = to_add if limit is None else to_add[:max(0, limit)]
     added_assets: set[int] = set()
     mattes_used: dict[str, int] = {}
+    uploads: list[dict] = []   # what went to the wall this run — the canary needs to see it
     for r in adds:
         pref_matte, pref_shape = prefs.get(r["asset_id"], (None, None))
         matte = mattes.matte_for(pref_matte, pref_shape, r["width"], r["height"], matte_cfg)
@@ -151,6 +153,8 @@ def refresh(client: FrameClient, conn: sqlite3.Connection, *, device_id, period,
         store.add_rotation_event(conn, device_id, r["asset_id"], "added", period["name"])
         added_assets.add(r["asset_id"])
         mattes_used[matte] = mattes_used.get(matte, 0) + 1
+        uploads.append({"asset_id": r["asset_id"], "name": r["original_name"], "content_id": content_id,
+                        "size": (r["width"], r["height"]), "matte": matte})
         added += 1
 
     removals = to_remove if removals_ok else []
@@ -182,5 +186,5 @@ def refresh(client: FrameClient, conn: sqlite3.Connection, *, device_id, period,
                     period["name"])
     return {"desired": len(desired), "added": added, "removed": removed, "errors": errors,
             "harvested": len(harvested), "removals_skipped": not removals_ok,
-            "pending_adds": len(to_add) - len(adds), "mattes_used": mattes_used,
+            "pending_adds": len(to_add) - len(adds), "mattes_used": mattes_used, "uploads": uploads,
             "interval": period["interval"], "shuffle": period["shuffle"]}

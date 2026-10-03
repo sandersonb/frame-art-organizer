@@ -205,3 +205,11 @@ def test_an_edit_harvested_in_this_refresh_is_applied_to_the_same_refreshs_uploa
     assert res["harvested"] == 1
     assert _upload_of(client) == [("upload", "modern_polar")]         # the NEW upload carries the user's choice
     assert conn.execute("SELECT matte FROM asset_policy WHERE asset_id = ?", (a,)).fetchone()[0] == "modern_polar"
+
+
+def test_refresh_reports_what_it_uploaded_so_a_canary_can_be_inspected(conn, wants_one):
+    dev, a2, tmp = wants_one
+    add_derivative(conn, a2, width=1600, height=1200, path=_file(tmp, "2.jpg"))     # a native 4:3
+    res = _refresh(FakeClient([item("MY_F0001")]), conn, dev)
+    assert res["uploads"] == [{"asset_id": a2, "name": "photo2.jpg", "content_id": "MY_F0101",
+                               "size": (1600, 1200), "matte": "flexible_black"}]

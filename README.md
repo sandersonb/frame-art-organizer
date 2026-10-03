@@ -145,6 +145,8 @@ within `crop_tolerance` of 16:9 is cropped to exactly 16:9; anything else (portr
 squares, 4:3…) is kept whole and uploaded with a matte so it isn't cropped on the wall.
 `fao plan-report` shows exactly what it would do to each photo — review it before switching.
 Invalid values (e.g. a matte type the TV can't show for that shape) are rejected at startup.
+To switch a running setup over safely (canary, batches, rollback) follow the runbook in
+`SPEC.md` §12.12 — and keep the daemon stopped while you do.
 Note: the Frame's info overlay can show a photo's **date** (taken from EXIF on import) but
 **not a custom title** — that's a platform limitation (see SAMSUNG_FRAME_API.md). "Rename"
 in the UI sets a local label only.

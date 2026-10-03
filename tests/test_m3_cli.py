@@ -47,3 +47,22 @@ def test_schedule_show_is_quiet_about_staleness_when_fully_migrated(conn, monkey
     cli.cmd_schedule_show(SimpleNamespace())
     out = capsys.readouterr().out
     assert "resident on it: 1/1" in out and "stale" not in out
+
+
+def test_schedule_refresh_lists_each_upload_so_the_canary_can_be_checked_on_the_wall(conn, monkeypatch, capsys):
+    monkeypatch.setattr(cli.ingest, "render_pending", lambda *a, **k: 0)
+    monkeypatch.setattr(scheduler, "refresh", lambda *a, **k: {
+        "desired": 2, "added": 2, "removed": 2, "errors": 0, "harvested": 0, "removals_skipped": False,
+        "pending_adds": 5, "mattes_used": {"flexible_black": 1, "none": 1}, "interval": 15, "shuffle": True,
+        "uploads": [{"asset_id": 4, "name": "portrait.jpg", "content_id": "MY_F0123", "size": (1440, 2160), "matte": "flexible_black"},
+                    {"asset_id": 7, "name": "dslr.jpg", "content_id": "MY_F0124", "size": (3840, 2160), "matte": "none"}]})
+    monkeypatch.setattr(cli, "_library", lambda args: (conn, {"derivatives": None}, V2))
+    monkeypatch.setattr(cli, "_client", lambda args: (FakeTV(None), V2))
+    monkeypatch.setattr(cli, "_ensure_device", lambda c, f: 1)
+
+    cli.cmd_schedule_refresh(SimpleNamespace(limit=2))
+
+    out = capsys.readouterr().out
+    assert "+ portrait.jpg  1440x2160  matte=flexible_black  -> MY_F0123" in out
+    assert "+ dslr.jpg  3840x2160  matte=none  -> MY_F0124" in out
+    assert "5 more swap(s) pending" in out

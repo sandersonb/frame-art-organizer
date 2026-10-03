@@ -260,6 +260,9 @@ def cmd_schedule_refresh(args) -> int:
     print(f"refresh[{period['name']}]: desired={res['desired']} added={res['added']} "
           f"removed={res['removed']} errors={res['errors']} matte_edits={res['harvested']}; "
           f"slideshow {res['interval']}m shuffle={res['shuffle']}")
+    for u in res.get("uploads", []):
+        print(f"  + {u['name'] or u['asset_id']}  {u['size'][0]}x{u['size'][1]}  matte={u['matte']}"
+              f"  -> {u['content_id']}")
     if res["mattes_used"]:
         print(f"  mattes on new uploads: {res['mattes_used']}")
     if res["pending_adds"]:
