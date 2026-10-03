@@ -125,11 +125,17 @@ def refresh(client: FrameClient, conn: sqlite3.Connection, *, device_id, period,
                       period["name"])
         removals_ok = False
 
+    # Read the preferences AFTER the harvest. The plan rows carry copies taken before it, so an
+    # edit the user made on the TV since the last run (just harvested above) would otherwise be
+    # missed by this run's uploads: the old item is deleted, the new one gets the stale matte,
+    # and the edit is lost for good. (Found by the migration dress rehearsal.)
+    prefs = store.asset_matte_prefs(conn)
     adds = to_add if limit is None else to_add[:max(0, limit)]
     added_assets: set[int] = set()
     mattes_used: dict[str, int] = {}
     for r in adds:
-        matte = mattes.matte_for(r["pref_matte"], r["pref_shape"], r["width"], r["height"], matte_cfg)
+        pref_matte, pref_shape = prefs.get(r["asset_id"], (None, None))
+        matte = mattes.matte_for(pref_matte, pref_shape, r["width"], r["height"], matte_cfg)
         placement_id = store.create_pending_placement(conn, device_id, r["derivative_id"], matte)
         try:
             data = Path(r["path"]).read_bytes()
