@@ -1,0 +1,348 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Frame Art Organizer</title>
+  <script src="https://unpkg.com/htmx.org@2.0.3"></script>
+  <script defer src="https://unpkg.com/alpinejs@3.14.1/dist/cdn.min.js"></script>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #16181d; --surface: #1d2028; --surface-2: #262b36;
+      --border: #2a2e37; --text: #e6e8ec; --muted: #8a90a0; --accent: #3b82f6;
+      --radius: 12px;
+    }
+    * { box-sizing: border-box; }
+    [x-cloak] { display: none !important; }
+    body { margin: 0; font: 15px/1.45 -apple-system, system-ui, "Segoe UI", sans-serif;
+           background: var(--bg); color: var(--text); }
+    button, input, select { font: inherit; color: inherit; }
+    button { cursor: pointer; }
+    h3 { margin: 0 0 12px; }
+    .ic { width: 1.15em; height: 1.15em; fill: none; stroke: currentColor; stroke-width: 2;
+          stroke-linecap: round; stroke-linejoin: round; vertical-align: -.16em; flex: none; }
+    .ic.big { width: 34px; height: 34px; }
+
+    header { display: flex; align-items: center; gap: 16px; padding: 16px 24px;
+             border-bottom: 1px solid var(--border); position: sticky; top: 0;
+             background: var(--bg); z-index: 20; }
+    .brand { font-size: 19px; font-weight: 680; letter-spacing: -.01em; }
+    .brand .count { color: var(--muted); font-size: 13px; font-weight: 400; margin-left: 10px; }
+    header .spacer { flex: 1; }
+    .btn { border: 1px solid var(--border); background: var(--surface); color: var(--text);
+           border-radius: 10px; padding: 9px 14px; font-weight: 550; display: inline-flex;
+           align-items: center; gap: 8px; }
+    .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .btn.primary:hover { filter: brightness(1.08); }
+    .btn.ghost { background: transparent; }
+    .btn.danger { color: #f2889b; border-color: #5b2330; }
+    .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+    .seg button { background: var(--surface); border: 0; padding: 9px 11px; color: var(--muted);
+                  display: grid; place-items: center; }
+    .seg button.active { background: var(--surface-2); color: var(--text); }
+    select.sort { background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+                  padding: 9px 12px; }
+
+    .filterbar { display: flex; gap: 10px; padding: 14px 24px; overflow-x: auto;
+                 border-bottom: 1px solid var(--border); }
+    .chip { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap;
+            background: var(--surface); border: 1px solid var(--border); color: var(--text);
+            border-radius: 999px; padding: 8px 14px; font-weight: 550; }
+    .chip:hover { border-color: #3a4150; }
+    .chip.active { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+    .chip.new { color: var(--muted); border-style: dashed; }
+    .chip .dot { width: 9px; height: 9px; border-radius: 50%; }
+    .chip .badge { background: var(--surface-2); color: var(--muted); border-radius: 999px;
+                   padding: 1px 8px; font-size: 12px; font-weight: 600; }
+    .chip.active .badge { color: var(--text); }
+
+    main { padding: 22px 24px 96px; }
+    .cards.grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+    .cards.list { display: flex; flex-direction: column; gap: 8px; }
+    .empty { color: var(--muted); text-align: center; padding: 80px 20px;
+             display: flex; flex-direction: column; align-items: center; gap: 14px; }
+    .empty .ic { width: 46px; height: 46px; stroke: #3a4150; }
+    .empty p { margin: 0; font-size: 15px; }
+
+    .card { background: var(--surface); border: 1px solid var(--border);
+            border-radius: var(--radius); position: relative; }
+    .card.menu-open { z-index: 30; }
+    .card.selected { outline: 2px solid var(--accent); outline-offset: -1px; }
+    .card .thumb { position: relative; }
+    .card .thumb img { width: 100%; aspect-ratio: 16/10; object-fit: cover; background: #0c0d11;
+                       display: block; border-radius: 12px 12px 0 0; }
+    .card .chk { position: absolute; top: 10px; left: 10px; width: 26px; height: 26px;
+                 border-radius: 7px; border: 2px solid rgba(255,255,255,.85);
+                 background: rgba(20,22,28,.45); backdrop-filter: blur(2px);
+                 display: grid; place-items: center; }
+    .card .chk.on { background: var(--accent); border-color: var(--accent); }
+    .card .chk .ic { width: 16px; height: 16px; stroke: #fff; }
+    .card .kebab { position: absolute; top: 10px; right: 10px; width: 30px; height: 30px;
+                   border-radius: 8px; border: 0; background: rgba(20,22,28,.55); color: #fff;
+                   backdrop-filter: blur(2px); display: grid; place-items: center; }
+    .card .kebab:hover { background: rgba(20,22,28,.85); }
+    .card .kebab .ic { width: 18px; height: 18px; }
+    .card .meta { padding: 10px 12px; }
+    .card .name { font-size: 13.5px; font-weight: 600; overflow: hidden;
+                  text-overflow: ellipsis; white-space: nowrap; }
+    .card .date { font-size: 12px; color: var(--muted); margin: 2px 0 8px; }
+    .tags { display: flex; flex-wrap: wrap; gap: 5px; }
+    .tag { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 600;
+           border-radius: 999px; padding: 2px 9px;
+           background: color-mix(in srgb, var(--c) 20%, var(--surface));
+           color: color-mix(in srgb, var(--c) 80%, white);
+           border: 1px solid color-mix(in srgb, var(--c) 35%, transparent); }
+    .tagx { background: transparent; border: 0; color: inherit; opacity: .55; font-size: 14px;
+            line-height: 1; padding: 0; }
+    .tagx:hover { opacity: 1; }
+    .cards.list .card { display: grid; grid-template-columns: 132px 1fr; align-items: stretch; }
+    .cards.list .card .thumb { height: 100%; }
+    .cards.list .card .thumb img { height: 100%; aspect-ratio: auto; border-radius: 12px 0 0 12px; }
+    .cards.list .card .meta { display: flex; flex-direction: column; justify-content: center;
+                              padding: 12px 16px; }
+    .cards.list .card .name { font-size: 14.5px; }
+
+    /* context menu */
+    .menu { position: absolute; top: 46px; right: 10px; width: 214px; z-index: 40;
+            background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px;
+            padding: 6px; box-shadow: 0 14px 34px rgba(0,0,0,.5); }
+    .menu.up { top: auto; bottom: 46px; right: 0; }
+    .submenu { margin: 2px 0 2px 6px; border-left: 1px solid var(--border); padding-left: 4px;
+               max-height: 200px; overflow: auto; }
+    .mi { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+          background: transparent; border: 0; color: var(--text); padding: 8px 10px;
+          border-radius: 7px; font-size: 14px; }
+    .mi:hover { background: rgba(255,255,255,.06); }
+    .mi.danger { color: #f2889b; }
+    .mi .chev { margin-left: auto; width: 1em; height: 1em; }
+    .mi .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+
+    /* bulk bar */
+    .bulkbar { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%);
+               display: flex; align-items: center; gap: 10px; z-index: 55;
+               background: var(--surface-2); border: 1px solid var(--border);
+               border-radius: 12px; padding: 10px 14px; box-shadow: 0 16px 40px rgba(0,0,0,.55); }
+    .bulkbar > span { font-weight: 600; margin-right: 4px; }
+    .bulk-add { position: relative; }
+
+    /* modals */
+    .overlay { position: fixed; inset: 0; background: rgba(8,9,12,.66); z-index: 60;
+               display: grid; place-items: center; padding: 24px; }
+    .modal { background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
+             width: min(520px, 100%); max-height: 88vh; overflow: auto; padding: 18px; }
+    .modal.small { width: min(360px, 100%); }
+    .modal-img { width: 100%; border-radius: 10px; aspect-ratio: 16/10; object-fit: cover;
+                 background: #0c0d11; margin-bottom: 12px; }
+    .kv { display: flex; justify-content: space-between; gap: 16px; padding: 6px 0;
+          border-top: 1px solid var(--border); font-size: 13.5px; }
+    .kv > span:first-child { color: var(--muted); }
+    .kv .mono { font-family: ui-monospace, monospace; }
+    .modal .btn { margin-top: 14px; }
+    .field { width: 100%; background: var(--bg); border: 1px solid var(--border);
+             border-radius: 8px; padding: 9px 11px; margin-bottom: 12px; }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
+    .swatches { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+    .swatch { width: 30px; height: 30px; border-radius: 8px; border: 2px solid transparent; }
+    .swatch.sel { border-color: #fff; }
+    .dropzone { display: flex; flex-direction: column; align-items: center; gap: 8px;
+                justify-content: center; text-align: center; color: var(--muted);
+                border: 2px dashed var(--border); border-radius: 12px; padding: 30px;
+                margin-bottom: 12px; cursor: pointer; }
+    .dropzone.drag { border-color: var(--accent); color: var(--text); }
+
+    /* mobile */
+    @media (max-width: 640px) {
+      header { padding: 12px 14px; gap: 10px; }
+      .brand { font-size: 17px; }
+      .brand .count { display: none; }
+      .btn-label { display: none; }              /* Upload becomes icon-only */
+      main { padding: 16px 14px 96px; }
+      .cards.grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
+      .filterbar { padding: 12px 14px; }
+      .bulkbar { left: 12px; right: 12px; transform: none; justify-content: center; flex-wrap: wrap; }
+    }
+  </style>
+</head>
+<body x-data="organizer('{{ active_filter }}', '{{ sort }}', '{{ view }}')" x-init="init()">
+  {% include "_icons.html" %}
+  <script id="collections-data" type="application/json">{{ counts.collections | tojson }}</script>
+
+  <header>
+    <div class="brand">Frame Art Organizer<span class="count">{{ counts.all }} photos</span></div>
+    <div class="spacer"></div>
+    <button class="btn primary" @click="showUpload = true">
+      <svg class="ic"><use href="#ti-cloud-upload"></use></svg> <span class="btn-label">Upload Photos</span>
+    </button>
+    <div class="seg">
+      <button :class="{active: view==='grid'}" @click="setView('grid')" title="Grid">
+        <svg class="ic"><use href="#ti-layout-grid"></use></svg></button>
+      <button :class="{active: view==='list'}" @click="setView('list')" title="List">
+        <svg class="ic"><use href="#ti-list"></use></svg></button>
+    </div>
+    <select class="sort" @change="setSort($event.target.value)">
+      <option value="newest" {{ 'selected' if sort=='newest' }}>Newest</option>
+      <option value="oldest" {{ 'selected' if sort=='oldest' }}>Oldest</option>
+      <option value="name"   {{ 'selected' if sort=='name'   }}>Name A–Z</option>
+      <option value="taken"  {{ 'selected' if sort=='taken'  }}>Date taken</option>
+    </select>
+  </header>
+
+  <nav class="filterbar" id="filterbar">{% include "_filterbar.html" %}</nav>
+  <main id="gallery">{% include "_gallery.html" %}</main>
+
+  <!-- bulk action bar -->
+  <div class="bulkbar" x-show="sel.length" x-cloak>
+    <span x-text="sel.length + ' selected'"></span>
+    <div class="bulk-add">
+      <button class="btn" @click.stop="bulkAddOpen = !bulkAddOpen">
+        <svg class="ic"><use href="#ti-tag"></use></svg> Add to collection
+      </button>
+      <div class="menu up" x-show="bulkAddOpen" x-cloak @click.outside="bulkAddOpen = false">
+        <template x-for="col in collections" :key="col.id">
+          <button class="mi" @click="bulkAdd(col.name)">
+            <span class="dot" :style="`background:${col.color}`"></span><span x-text="col.name"></span>
+          </button>
+        </template>
+        <button class="mi" @click="bulkAddNew()">
+          <svg class="ic"><use href="#ti-plus"></use></svg> New collection…
+        </button>
+      </div>
+    </div>
+    <button class="btn danger" @click="bulkDelete()">
+      <svg class="ic"><use href="#ti-trash"></use></svg> Delete
+    </button>
+    <button class="btn ghost" @click="selectAll()">Select all</button>
+    <button class="btn ghost" @click="sel = []">Clear</button>
+  </div>
+
+  <!-- details modal -->
+  <div class="overlay" x-show="details" x-cloak @click="details = null">
+    <div class="modal" @click.stop x-show="details">
+      <template x-if="details">
+        <div>
+          <img class="modal-img" :src="`/thumb/${details.id}`" alt="">
+          <h3 x-text="details.title || details.original_name"></h3>
+          <div class="kv"><span>File</span><span x-text="details.original_name"></span></div>
+          <div class="kv"><span>Dimensions</span>
+            <span x-text="details.width ? `${details.width} × ${details.height}` : '—'"></span></div>
+          <div class="kv"><span>Taken</span><span x-text="details.captured_at || '—'"></span></div>
+          <div class="kv"><span>Imported</span><span x-text="details.imported_at"></span></div>
+          <div class="kv"><span>Size</span>
+            <span x-text="details.bytes ? Math.round(details.bytes/1024) + ' KB' : '—'"></span></div>
+          <div class="kv"><span>On Frame</span>
+            <span x-text="details.on_frame.length ? details.on_frame.join(', ') : 'Not resident'"></span></div>
+          <div class="kv"><span>Collections</span>
+            <span x-text="details.collections.map(c => c.name).join(', ') || '—'"></span></div>
+          <div class="kv"><span>SHA-256</span>
+            <span class="mono" x-text="details.sha256.slice(0,16) + '…'"></span></div>
+          <button class="btn" @click="details = null">Close</button>
+        </div>
+      </template>
+    </div>
+  </div>
+
+  <!-- upload modal -->
+  <div class="overlay" x-show="showUpload" x-cloak @click="showUpload = false">
+    <div class="modal" @click.stop>
+      <h3>Upload photos</h3>
+      <form action="/upload" method="post" enctype="multipart/form-data" @submit="showUpload = false">
+        <label class="dropzone" :class="{ drag }" @dragover.prevent="drag = true"
+               @dragleave.prevent="drag = false" @drop.prevent="onDrop($event)">
+          <svg class="ic big"><use href="#ti-cloud-upload"></use></svg>
+          <span x-text="fileLabel || 'Drop photos here, or click to choose'"></span>
+          <input type="file" name="files" accept="image/*,.heic,.heif" multiple required hidden
+                 x-ref="fileInput" @change="fileLabel = $event.target.files.length + ' file(s) selected'">
+        </label>
+        <input type="text" name="collections" class="field" placeholder="collections, comma-separated">
+        <div class="modal-actions">
+          <button type="button" class="btn ghost" @click="showUpload = false">Cancel</button>
+          <button type="submit" class="btn primary">Upload</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- new collection modal -->
+  <div class="overlay" x-show="showNewCol" x-cloak @click="showNewCol = false">
+    <div class="modal small" @click.stop>
+      <h3>New collection</h3>
+      <input type="text" class="field" x-model="newColName" placeholder="Name"
+             @keydown.enter="createCollection()">
+      <div class="swatches">
+        <template x-for="c in palette" :key="c">
+          <button class="swatch" :style="`background:${c}`" :class="{ sel: newColColor === c }"
+                  @click="newColColor = c"></button>
+        </template>
+      </div>
+      <div class="modal-actions">
+        <button class="btn ghost" @click="showNewCol = false">Cancel</button>
+        <button class="btn primary" @click="createCollection()">Create</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    document.addEventListener('alpine:init', () => {
+      Alpine.data('organizer', (filter, sort, view) => ({
+        filter, sort,
+        view: localStorage.getItem('view') || view,
+        sel: [], showUpload: false, menu: null, addToOpen: false, details: null,
+        bulkAddOpen: false, showNewCol: false, newColName: '', newColColor: '#3b82f6',
+        drag: false, fileLabel: '',
+        palette: ['#3b82f6', '#8b5cf6', '#10b981', '#ef4444', '#f59e0b', '#14b8a6', '#ec4899', '#6366f1'],
+        collections: JSON.parse(document.getElementById('collections-data').textContent),
+
+        init() { if (this.view !== view) this.refresh(); },
+        refresh() {
+          htmx.ajax('GET',
+            `/gallery?filter=${encodeURIComponent(this.filter)}&sort=${this.sort}&view=${this.view}`,
+            { target: '#gallery', swap: 'innerHTML' });
+        },
+        refreshBar() { htmx.ajax('GET', '/filterbar', { target: '#filterbar', swap: 'innerHTML' }); },
+        after() { this.menu = null; this.refresh(); this.refreshBar(); },
+        setFilter(f) { this.filter = f; this.refresh(); },
+        setSort(s) { this.sort = s; this.refresh(); },
+        setView(v) { this.view = v; localStorage.setItem('view', v); this.refresh(); },
+        toggle(id) { const i = this.sel.indexOf(id); i < 0 ? this.sel.push(id) : this.sel.splice(i, 1); },
+        selected(id) { return this.sel.includes(id); },
+        selectAll() { this.sel = [...document.querySelectorAll('#gallery .card')].map(el => +el.id.replace('card-', '')); },
+        post(url, data) {
+          const f = new FormData();
+          for (const k in (data || {})) f.append(k, data[k]);
+          return fetch(url, { method: 'POST', body: f });
+        },
+        addTo(id, name) { this.post(`/asset/${id}/collection`, { name }).then(() => this.after()); },
+        addToNew(id) { const n = prompt('New collection name'); if (n) this.addTo(id, n); },
+        removeFrom(id, cid) { this.post(`/asset/${id}/collection/remove`, { collection_id: cid }).then(() => this.after()); },
+        rename(id) {
+          const t = prompt('Display name (leave blank to clear)');
+          if (t === null) return;
+          this.post(`/asset/${id}/rename`, { title: t }).then(() => { this.menu = null; this.refresh(); });
+        },
+        download(id) { this.menu = null; window.location = `/asset/${id}/download`; },
+        del(id) {
+          if (!confirm('Delete this photo? It is also removed from the Frame.')) return;
+          this.post(`/asset/${id}/delete`).then(() => this.after());
+        },
+        viewDetails(id) { this.menu = null; fetch(`/asset/${id}`).then(r => r.json()).then(d => this.details = d); },
+        newCollection() { this.newColName = ''; this.newColColor = this.palette[0]; this.showNewCol = true; },
+        createCollection() {
+          const name = this.newColName.trim(); if (!name) return;
+          this.post('/collection', { name, color: this.newColColor }).then(() => {
+            this.collections.push({ id: Date.now(), name, color: this.newColColor });
+            this.showNewCol = false; this.refreshBar();
+          });
+        },
+        bulkAdd(name) { this.post('/bulk/collection', { asset_ids: this.sel.join(','), name }).then(() => { this.bulkAddOpen = false; this.sel = []; this.after(); }); },
+        bulkAddNew() { const n = prompt('New collection name'); if (n) this.bulkAdd(n); },
+        bulkDelete() {
+          if (!confirm(`Delete ${this.sel.length} photo(s)? They are also removed from the Frame.`)) return;
+          this.post('/bulk/delete', { asset_ids: this.sel.join(',') }).then(() => { this.sel = []; this.after(); });
+        },
+        onDrop(e) { this.$refs.fileInput.files = e.dataTransfer.files; this.fileLabel = e.dataTransfer.files.length + ' file(s) selected'; this.drag = false; },
+      }));
+    });
+  </script>
+</body>
+</html>

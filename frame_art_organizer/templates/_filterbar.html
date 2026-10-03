@@ -1,0 +1,22 @@
+{# Collection filter chips. `counts` = {all, none, broken, collections:[{id,name,color,count}]} #}
+<button class="chip" :class="{active: filter==='all'}" @click="setFilter('all')">
+  All Photos <span class="badge">{{ counts.all }}</span>
+</button>
+<button class="chip" :class="{active: filter==='none'}" @click="setFilter('none')">
+  <svg class="ic"><use href="#ti-tag"></use></svg> No Collection <span class="badge">{{ counts.none }}</span>
+</button>
+{% for col in counts.collections %}
+<button class="chip" :class="{active: filter==='col:{{ col.id }}'}" @click="setFilter('col:{{ col.id }}')">
+  <span class="dot" style="background: {{ col.color or '#8a90a0' }}"></span>
+  {{ col.name }} <span class="badge">{{ col.count }}</span>
+</button>
+{% endfor %}
+{% if counts.broken %}
+<button class="chip" :class="{active: filter==='broken'}" @click="setFilter('broken')">
+  <span class="dot" style="background: #ef4444"></span>
+  broken <span class="badge">{{ counts.broken }}</span>
+</button>
+{% endif %}
+<button class="chip new" @click="newCollection()">
+  <svg class="ic"><use href="#ti-plus"></use></svg> New Collection
+</button>

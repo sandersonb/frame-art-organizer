@@ -1,0 +1,14 @@
+{# Gallery fragment: grid|list of cards. `view` = 'grid'|'list'. Swapped by HTMX. #}
+{% if not assets %}
+  <div class="empty">
+    <svg class="ic"><use href="#ti-photo"></use></svg>
+    <p>No photos in this view. Upload some, or pick another filter.</p>
+    <button class="btn primary" @click="showUpload = true">
+      <svg class="ic"><use href="#ti-cloud-upload"></use></svg> Upload Photos
+    </button>
+  </div>
+{% else %}
+<div class="cards {{ view }}">
+  {% for a in assets %}{% include "_card.html" %}{% endfor %}
+</div>
+{% endif %}

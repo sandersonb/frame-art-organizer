@@ -1,0 +1,35 @@
+[project]
+name = "frame-art-organizer"
+version = "0.1.0"
+description = "Local library + scheduler that drives a Samsung The Frame's Art Mode over the LAN"
+requires-python = ">=3.11"
+dependencies = [
+    "samsungtvws>=3.0.6",
+    "Pillow>=10",
+]
+
+[project.optional-dependencies]
+# HEIC/HEIF support (iPhone photos). Optional because it builds a C extension
+# that may not have a wheel on bleeding-edge Python; the app degrades gracefully.
+heic = ["pillow-heif>=0.16"]
+# Web UI (Phase 3). Only needed for `fao serve`. Plain uvicorn (no [standard]) to
+# avoid uvloop/httptools C-extension wheel gaps on bleeding-edge Python; h11 is fine on a LAN.
+web = [
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    "jinja2>=3.1",
+    "python-multipart>=0.0.9",
+]
+
+[project.scripts]
+fao = "frame_art_organizer.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["frame_art_organizer"]
+
+[tool.setuptools.package-data]
+frame_art_organizer = ["templates/*.html"]

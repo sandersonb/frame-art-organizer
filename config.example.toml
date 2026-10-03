@@ -1,0 +1,65 @@
+# Frame Art Organizer configuration TEMPLATE.
+#
+#   cp config.example.toml config.toml        # then edit config.toml
+#
+# `config.toml` is gitignored (it holds your TV's LAN address), so it never gets
+# committed. Only this template is tracked. Read by frame_art_organizer.config.
+
+[frame]
+host = "192.168.1.XXX"          # CHANGE ME: the Frame's LAN IP (SmartThings app or your router)
+port = 8002                     # TLS websocket (token auth) — leave at 8002
+token_file = ".token"           # pairing token, relative to this file. Gitignored — NEVER commit it.
+name = "FrameArtOrganizer"      # shows up in the TV's device list
+connect_timeout = 3.0           # seconds; the reachability probe before any API call
+
+[paths]
+# Dev defaults (relative to this file). On the Pi these become /srv/frame/... .
+inbox       = "data/inbox"      # optional watched folder (e.g. an SMB share) for bulk drops
+originals   = "data/originals"  # preserved, content-addressed archive of originals
+derivatives = "data/derivatives" # rendered 3840x2160 JPEGs (regenerable cache)
+database    = "data/state.db"   # SQLite store
+
+[image]
+width = 3840                    # the panel is native 3840x2160
+height = 2160
+jpeg_quality = 92
+default_matte = "none"          # Frame matte; "none" fills the panel. See get_matte_list.
+default_fit = "cover"           # cover = crop-fill to 16:9, contain = letterbox with bars
+pipeline_version = 1            # bump to force re-render of all derivatives
+
+[schedule]
+interval_minutes = 15          # within-set cadence; MUST be in {3,15,60,720,1440,10080}
+shuffle = true                 # TV shuffles the set vs. fixed order
+set_size = 40                  # max photos resident in the rotation at once
+no_repeat_days = 30            # prefer photos not rotated in within this window
+refresh_hours = 24             # recompose the set at least this often (rotates photos)
+
+# Periods choose which photos are eligible, by DAY OF WEEK and/or TIME OF DAY.
+# Fields per [[schedule.period]]:
+#   name          identifier (the daemon recomposes the set when the active name changes)
+#   collections   eligible photos; [] = ALL photos
+#   days          e.g. ["mon","tue","wed","thu","fri"] — omit/empty = every day
+#   start         "HH:MM"; among matching periods the active one is the last whose start passed
+#   interval_minutes / shuffle / set_size / no_repeat_days   override the [schedule] defaults
+# Day-restricted periods win over every-day ones. Example (Mon–Fri / Sat / Sun):
+#   [[schedule.period]]
+#   name = "weekdays"
+#   days = ["mon","tue","wed","thu","fri"]
+#   collections = ["a","b","c"]
+#   [[schedule.period]]
+#   name = "saturday"
+#   days = ["sat"]
+#   collections = ["a","b","c","d"]
+#   [[schedule.period]]
+#   name = "sunday"
+#   days = ["sun"]
+#   collections = ["d","e"]
+[[schedule.period]]
+name = "all-day"
+collections = []               # empty = ALL photos
+
+[daemon]
+# `fao serve` runs web-only unless this is true or you pass --daemon. The systemd
+# unit passes --daemon, so the appliance always runs the scheduler.
+enabled = false
+tick_seconds = 60              # how often the loop checks reachability / due-ness

@@ -1,0 +1,26 @@
+# Frame Art Organizer — systemd unit (web UI + scheduler daemon).
+# Install:
+#   sudo cp deploy/frame-art-organizer.service /etc/systemd/system/
+#   (edit User / WorkingDirectory / ExecStart paths below to match your Pi)
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now frame-art-organizer
+#   journalctl -u frame-art-organizer -f      # watch the scheduler log
+
+[Unit]
+Description=Frame Art Organizer (web UI + Frame scheduler)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/frame-art-organizer
+# --daemon force-enables the scheduler regardless of config.toml [daemon].enabled
+ExecStart=/home/pi/frame-art-organizer/.venv/bin/fao serve --host 0.0.0.0 --port 8080 --daemon
+Restart=on-failure
+RestartSec=5
+# The Frame's self-signed TLS triggers urllib3 warnings; keep the journal readable.
+Environment=PYTHONWARNINGS=ignore
+
+[Install]
+WantedBy=multi-user.target

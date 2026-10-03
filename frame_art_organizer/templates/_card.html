@@ -1,0 +1,58 @@
+{# One photo card. `a` = asset dict incl. a.collections = [{id,name,color}]. #}
+<div class="card" id="card-{{ a.id }}"
+     :class="{ selected: selected({{ a.id }}), 'menu-open': menu === {{ a.id }} }">
+  <div class="thumb">
+    <img src="/thumb/{{ a.id }}" loading="lazy" alt="{{ a.original_name }}">
+    <button class="chk" :class="{ on: selected({{ a.id }}) }"
+            @click.stop="toggle({{ a.id }})" title="Select">
+      <svg class="ic" x-show="selected({{ a.id }})" x-cloak><use href="#ti-check"></use></svg>
+    </button>
+    <button class="kebab" title="Menu"
+            @click.stop="menu = (menu === {{ a.id }} ? null : {{ a.id }}); addToOpen = false">
+      <svg class="ic"><use href="#ti-dots"></use></svg>
+    </button>
+    <div class="menu" x-show="menu === {{ a.id }}" x-cloak
+         @click.outside="menu = null" @click.stop>
+      <button class="mi" @click="addToOpen = !addToOpen">
+        <svg class="ic"><use href="#ti-tag"></use></svg> Add to collection
+        <svg class="ic chev"><use href="#ti-chevron-right"></use></svg>
+      </button>
+      <div class="submenu" x-show="addToOpen" x-cloak>
+        <template x-for="col in collections" :key="col.id">
+          <button class="mi" @click="addTo({{ a.id }}, col.name)">
+            <span class="dot" :style="`background:${col.color}`"></span>
+            <span x-text="col.name"></span>
+          </button>
+        </template>
+        <button class="mi" @click="addToNew({{ a.id }})">
+          <svg class="ic"><use href="#ti-plus"></use></svg> New collection…
+        </button>
+      </div>
+      <button class="mi" @click="rename({{ a.id }})">
+        <svg class="ic"><use href="#ti-pencil"></use></svg> Rename
+      </button>
+      <button class="mi" @click="viewDetails({{ a.id }})">
+        <svg class="ic"><use href="#ti-info-circle"></use></svg> View details
+      </button>
+      <button class="mi" @click="download({{ a.id }})">
+        <svg class="ic"><use href="#ti-download"></use></svg> Download
+      </button>
+      <button class="mi danger" @click="del({{ a.id }})">
+        <svg class="ic"><use href="#ti-trash"></use></svg> Delete
+      </button>
+    </div>
+  </div>
+  <div class="meta">
+    <div class="name" title="{{ a.original_name }}">{{ a.title or a.original_name }}</div>
+    <div class="date">{{ a.captured_at or 'No date' }}</div>
+    <div class="tags">
+      {% if a.status == 'broken' %}<span class="tag" style="--c:#ef4444">broken</span>{% endif %}
+      {% for c in a.collections %}
+        <span class="tag" style="--c: {{ c.color or '#8a90a0' }}">{{ c.name }}
+          <button class="tagx" title="Remove from {{ c.name }}"
+                  @click.stop="removeFrom({{ a.id }}, {{ c.id }})">×</button>
+        </span>
+      {% endfor %}
+    </div>
+  </div>
+</div>

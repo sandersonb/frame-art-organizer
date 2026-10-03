@@ -1,0 +1,30 @@
+# secrets & local config — never commit
+# (the Frame pairing token, and config.toml which holds your TV's LAN address;
+#  copy config.example.toml to config.toml to configure)
+.token
+.token*
+*.token
+config.toml
+.env
+
+# python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+
+# generated / local data (your photos, the library DB)
+data/
+originals/
+derivatives/
+*.log
+state.db
+state.db-wal
+state.db-shm
+
+# editors / macOS
+.idea/
+.vscode/
+.DS_Store
