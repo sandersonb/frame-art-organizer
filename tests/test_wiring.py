@@ -8,6 +8,7 @@ from conftest import add_asset, add_derivative, add_device, add_placement, item,
 
 from frame_art_organizer import scheduler, store, uploader
 from frame_art_organizer.frame_client import FrameAsleep, FrameTimeout
+from frame_art_organizer.mattes import MatteConfig
 
 PERIOD = {"name": "all-day", "collections": [], "interval": 15, "shuffle": True,
           "set_size": 1, "no_repeat_days": 30}
@@ -38,9 +39,9 @@ class FakeClient:
         self.calls.append(("slideshow", duration))
 
 
-def _refresh(client, conn, dev):
-    return scheduler.refresh(client, conn, device_id=dev, period=PERIOD,
-                             fit_mode="cover", pipeline_version=1, matte="none")
+def _refresh(client, conn, dev, **kw):
+    return scheduler.refresh(client, conn, device_id=dev, period=PERIOD, fit_mode="cover",
+                             pipeline_version=1, matte_cfg=MatteConfig(), **kw)
 
 
 @pytest.fixture

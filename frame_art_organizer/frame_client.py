@@ -13,10 +13,14 @@ from __future__ import annotations
 import concurrent.futures
 import logging
 import socket
+import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
 from samsungtvws import SamsungTVWS
+from samsungtvws.exceptions import ConnectionFailure
+
+from . import mattes
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +48,8 @@ class FrameConfig:
     connect_timeout: float = 3.0
     ws_timeout: float = 60.0        # generous: covers the one-time on-screen Allow prompt
     ws_call_timeout: float = 20.0   # hard cap per art call so a hang can't freeze us
+    connect_retries: int = 2        # retries for a transient ConnectionFailure (not for timeouts)
+    connect_retry_delay: float = 1.0
 
 
 class FrameClient:
@@ -96,25 +102,52 @@ class FrameClient:
             )
         return self._exec
 
+    def _drop_connection(self) -> None:
+        """Close BOTH websockets and forget them; the next call reconnects lazily.
+
+        `tv.art()` builds a separate SamsungTVArt with its own socket, so closing only `_tv`
+        left the art connection to the garbage collector — and a worker thread blocked in
+        recv() keeps it alive forever. Closing from here also unblocks that thread.
+        """
+        for conn in (self._art, self._tv):
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:  # noqa: BLE001 - closing must never raise
+                    log.debug("error closing TV connection", exc_info=True)
+        self._art = None
+        self._tv = None
+
     def _bounded(self, fn, timeout: Optional[float] = None):
-        """Run `fn` under a hard timeout. A hung call raises FrameTimeout; the worker
-        thread is abandoned (not awaited) so we never block on a wedged firmware call."""
-        fut = self._executor.submit(fn)
-        try:
-            return fut.result(timeout=timeout or self.cfg.ws_call_timeout)
-        except concurrent.futures.TimeoutError:
-            raise FrameTimeout(
-                f"art call exceeded {timeout or self.cfg.ws_call_timeout}s — TV not responding"
-            )
+        """Run `fn` under a hard timeout.
+
+        - A hung call raises FrameTimeout, and the connection is closed so the stuck worker
+          thread is released instead of leaving a half-open session on the TV.
+        - A transient ConnectionFailure (e.g. another client's `clientDisconnect` arrived
+          first, API notes §8) reconnects and retries up to `connect_retries` times. It is
+          raised before anything is sent, so retrying an upload cannot duplicate it.
+        `fn` should reach the connection via `self.art`/`self.tv` (not capture it), so a retry
+        uses the fresh connection.
+        """
+        limit = timeout or self.cfg.ws_call_timeout
+        attempts = 1 + max(0, self.cfg.connect_retries)
+        for attempt in range(1, attempts + 1):
+            fut = self._executor.submit(fn)
+            try:
+                return fut.result(timeout=limit)
+            except concurrent.futures.TimeoutError:
+                self._drop_connection()
+                raise FrameTimeout(f"art call exceeded {limit}s — TV not responding")
+            except ConnectionFailure:
+                self._drop_connection()
+                if attempt == attempts:
+                    raise
+                log.info("connect attempt %d/%d failed (transient); retrying", attempt, attempts)
+                if self.cfg.connect_retry_delay > 0:
+                    time.sleep(self.cfg.connect_retry_delay)
 
     def close(self) -> None:
-        if self._tv is not None:
-            try:
-                self._tv.close()
-            except Exception:  # noqa: BLE001 - closing must never raise
-                log.debug("error closing TV connection", exc_info=True)
-            self._tv = None
-            self._art = None
+        self._drop_connection()
         if self._exec is not None:
             self._exec.shutdown(wait=False, cancel_futures=True)
             self._exec = None
@@ -131,20 +164,20 @@ class FrameClient:
 
     def device_info(self) -> dict:
         self.ensure_awake()
-        return self._bounded(self.tv.rest_device_info)
+        return self._bounded(lambda: self.tv.rest_device_info())
 
     def api_version(self) -> str:
         self.ensure_awake()
-        return self._bounded(self.art.get_api_version)
+        return self._bounded(lambda: self.art.get_api_version())
 
     def artmode(self) -> str:
         """'on' or 'off'."""
         self.ensure_awake()
-        return self._bounded(self.art.get_artmode)
+        return self._bounded(lambda: self.art.get_artmode())
 
     def current(self) -> dict:
         self.ensure_awake()
-        return self._bounded(self.art.get_current)
+        return self._bounded(lambda: self.art.get_current())
 
     def list_my_photos(self) -> list[dict]:
         self.ensure_awake()
@@ -155,9 +188,17 @@ class FrameClient:
 
         `date` ('YYYY:MM:DD HH:MM:SS') sets the date the Frame's overlay shows — the only
         settable metadata. Embedded EXIF is ignored (tested), so it must be passed here.
+
+        `matte` must be 'none' or '<type>_<color>' from the TV's own vocabulary — anything else
+        is refused before it reaches the TV (a mismatched matte can crash it, API notes §7.6).
+        `portrait_matte` is always 'none': the TV UI only ever sets `matte_id`, and a portrait
+        displays correctly with it 'none' (API notes §7.4).
         """
+        if not mattes.valid_matte_string(matte):
+            raise ValueError(f"refusing to upload with matte {matte!r}: not in the TV's matte list")
         self.ensure_awake()
-        kwargs: dict[str, Any] = {"matte": matte, "portrait_matte": matte, "file_type": "JPEG"}
+        kwargs: dict[str, Any] = {"matte": mattes.normalize(matte), "portrait_matte": "none",
+                                  "file_type": "JPEG"}
         if date:
             kwargs["date"] = date
         # Uploads move bytes, so allow more time than a normal control call.

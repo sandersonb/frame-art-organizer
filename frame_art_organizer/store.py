@@ -193,9 +193,12 @@ def derivatives_to_upload(conn: sqlite3.Connection, device_id, fit_mode,
     """Current derivatives of active assets with no present/pending placement here."""
     return conn.execute(
         """SELECT d.id AS derivative_id, d.path AS path, a.id AS asset_id,
-                  a.captured_at AS captured_at, a.original_name AS original_name
+                  a.captured_at AS captured_at, a.original_name AS original_name,
+                  d.width AS width, d.height AS height,
+                  ap.matte AS pref_matte, ap.matte_shape AS pref_shape
            FROM derivative d
            JOIN asset a ON a.id = d.asset_id
+           LEFT JOIN asset_policy ap ON ap.asset_id = a.id
            WHERE a.status = 'active' AND d.fit_mode = ? AND d.pipeline_version = ?
              AND NOT EXISTS (
                SELECT 1 FROM placement p
@@ -436,7 +439,9 @@ def compose_working_set(conn, *, device_id, collections, fit_mode, pipeline_vers
     sql = f"""
         SELECT d.id AS derivative_id, a.id AS asset_id, d.path AS path,
                a.captured_at AS captured_at, a.original_name AS original_name,
-               COALESCE(ap.pinned, 0) AS pinned
+               COALESCE(ap.pinned, 0) AS pinned,
+               d.width AS width, d.height AS height,
+               ap.matte AS pref_matte, ap.matte_shape AS pref_shape
         FROM asset a
         {col_join}
         JOIN derivative d ON d.asset_id = a.id AND d.fit_mode = ? AND d.pipeline_version = ?

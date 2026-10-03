@@ -98,14 +98,13 @@ def _ensure_device(conn, fc) -> int:
 def cmd_sync(args) -> int:
     conn, _, cfg = _library(args)
     fc, _ = _client(args)
-    img = cfg.get("image", {})
+    img = config.image_settings(cfg)
     with fc:
         device_id = _ensure_device(conn, fc)
         s = uploader.sync(
             fc, conn, device_id=device_id,
-            fit_mode=img.get("default_fit", "cover"),
-            pipeline_version=int(img.get("pipeline_version", 1)),
-            matte=img.get("default_matte", "none"),
+            fit_mode=img.default_fit, pipeline_version=img.pipeline_version,
+            matte_cfg=img.matte,
         )
         r = uploader.reconcile(fc, conn, device_id)
     print(f"sync: uploaded={s['uploaded']} errors={s['errors']}")
@@ -234,15 +233,14 @@ def cmd_schedule_show(args) -> int:
 def cmd_schedule_refresh(args) -> int:
     conn, _, cfg = _library(args)
     fc, _ = _client(args)
-    img = cfg.get("image", {})
+    img = config.image_settings(cfg)
     period = _active_period(cfg)
     with fc:
         device_id = _ensure_device(conn, fc)
         res = scheduler.refresh(
             fc, conn, device_id=device_id, period=period,
-            fit_mode=img.get("default_fit", "cover"),
-            pipeline_version=int(img.get("pipeline_version", 1)),
-            matte=img.get("default_matte", "none"),
+            fit_mode=img.default_fit, pipeline_version=img.pipeline_version,
+            matte_cfg=img.matte,
         )
     print(f"refresh[{period['name']}]: desired={res['desired']} added={res['added']} "
           f"removed={res['removed']} errors={res['errors']} matte_edits={res['harvested']}; "

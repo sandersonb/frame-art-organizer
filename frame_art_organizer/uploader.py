@@ -14,17 +14,20 @@ import sqlite3
 from pathlib import Path
 
 from . import harvest as harvest_mod
-from . import store
+from . import mattes, store
 from .frame_client import FrameAsleep, FrameClient
 
 log = logging.getLogger(__name__)
 
 
 def sync(client: FrameClient, conn: sqlite3.Connection, *, device_id: int,
-         fit_mode: str, pipeline_version: int, matte: str) -> dict:
-    """Upload derivatives not yet resident on the device. Two-phase per item."""
+         fit_mode: str, pipeline_version: int, matte_cfg: mattes.MatteConfig) -> dict:
+    """Upload derivatives not yet resident on the device. Two-phase per item.
+
+    Each photo's matte comes from `mattes.matte_for` (SPEC.md §12.3)."""
     summary = {"uploaded": 0, "errors": 0}
     for d in store.derivatives_to_upload(conn, device_id, fit_mode, pipeline_version):
+        matte = mattes.matte_for(d["pref_matte"], d["pref_shape"], d["width"], d["height"], matte_cfg)
         placement_id = store.create_pending_placement(conn, device_id, d["derivative_id"], matte)
         try:
             data = Path(d["path"]).read_bytes()

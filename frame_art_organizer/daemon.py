@@ -37,10 +37,10 @@ class Daemon:
         self.tick = float(tick if tick is not None else dcfg.get("tick_seconds", 60))
         # How often (while the TV is awake) to read back matte edits made on the TV; 0 = off.
         self.harvest_interval = timedelta(minutes=float(dcfg.get("harvest_minutes", 15)))
-        img = cfg.get("image", {})
-        self.fit = img.get("default_fit", "cover")
-        self.pv = int(img.get("pipeline_version", 1))
-        self.matte = img.get("default_matte", "none")
+        img = config.image_settings(cfg)   # validated: a bad [image] value fails at startup
+        self.fit = img.default_fit
+        self.pv = img.pipeline_version
+        self.matte_cfg = img.matte
         self.refresh_interval = timedelta(
             hours=float(cfg.get("schedule", {}).get("refresh_hours", 24))
         )
@@ -92,7 +92,7 @@ class Daemon:
                 if due:
                     res = scheduler.refresh(
                         fc, conn, device_id=device_id, period=period,
-                        fit_mode=self.fit, pipeline_version=self.pv, matte=self.matte,
+                        fit_mode=self.fit, pipeline_version=self.pv, matte_cfg=self.matte_cfg,
                     )
                     self._applied_period = period["name"]
                     self._last_refresh = now

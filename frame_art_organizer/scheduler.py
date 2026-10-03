@@ -17,24 +17,35 @@ from pathlib import Path
 from samsungtvws import exceptions
 
 from . import harvest as harvest_mod
-from . import store
+from . import mattes, store
 from .frame_client import FrameAsleep, FrameClient
 
 log = logging.getLogger(__name__)
 
 
 def plan(conn: sqlite3.Connection, *, device_id, period, fit_mode, pipeline_version):
-    """Returns (desired_rows, to_add_rows, to_remove_placements, present_placements)."""
+    """Returns (desired_rows, to_add_rows, to_remove_placements, present_placements).
+
+    Diffs by DERIVATIVE, not by asset. After a `pipeline_version` bump the resident (old)
+    derivative of a still-wanted photo is stale and its current one is "to add", so a version
+    change swaps stale for current through the normal add-before-remove order. In steady state
+    a photo has exactly one derivative, so this is identical to diffing by asset.
+
+    A resident photo whose current derivative has not been rendered yet is KEPT, never evicted
+    for lack of a replacement: the set must not shrink while a migration is half-rendered.
+    """
     desired = store.compose_working_set(
         conn, device_id=device_id, collections=period["collections"],
         fit_mode=fit_mode, pipeline_version=pipeline_version,
         no_repeat_days=period["no_repeat_days"], set_size=period["set_size"],
     )
     present = store.present_placements(conn, device_id)
-    present_assets = {p["asset_id"] for p in present}
-    desired_assets = {r["asset_id"] for r in desired}
-    to_add = [r for r in desired if r["asset_id"] not in present_assets]
-    to_remove = [p for p in present if p["asset_id"] not in desired_assets]
+    present_derivs = {p["derivative_id"] for p in present}
+    desired_derivs = {r["derivative_id"] for r in desired}
+    unrendered = {a["id"] for a in store.assets_needing_render(conn, fit_mode, pipeline_version)}
+    to_add = [r for r in desired if r["derivative_id"] not in present_derivs]
+    to_remove = [p for p in present
+                 if p["derivative_id"] not in desired_derivs and p["asset_id"] not in unrendered]
     return desired, to_add, to_remove, present
 
 
@@ -52,8 +63,15 @@ def _apply_slideshow(client: FrameClient, period) -> None:
 
 
 def refresh(client: FrameClient, conn: sqlite3.Connection, *, device_id, period,
-            fit_mode, pipeline_version, matte) -> dict:
-    """Reconcile MY-C0002 to the desired set and set the slideshow."""
+            fit_mode, pipeline_version, matte_cfg: mattes.MatteConfig,
+            limit: int | None = None) -> dict:
+    """Reconcile MY-C0002 to the desired set and set the slideshow.
+
+    Each upload's matte comes from `mattes.matte_for` (the user's TV-side choice for that photo
+    if any, else the shape's default). `limit` is for canaries (SPEC.md §12.8 M3): upload at
+    most that many photos this run and evict no more than were added, so the set never shrinks;
+    stale versions of photos just re-added are evicted first.
+    """
     desired, to_add, to_remove, _ = plan(
         conn, device_id=device_id, period=period,
         fit_mode=fit_mode, pipeline_version=pipeline_version,
@@ -68,7 +86,7 @@ def refresh(client: FrameClient, conn: sqlite3.Connection, *, device_id, period,
             period["name"], period["collections"] or "all",
         )
         return {"desired": 0, "added": 0, "removed": 0, "errors": 0, "skipped": "empty-set",
-                "harvested": 0, "removals_skipped": False,
+                "harvested": 0, "removals_skipped": False, "pending_adds": 0, "mattes_used": {},
                 "interval": period["interval"], "shuffle": period["shuffle"]}
 
     added = removed = errors = 0
@@ -88,7 +106,11 @@ def refresh(client: FrameClient, conn: sqlite3.Connection, *, device_id, period,
                       period["name"])
         removals_ok = False
 
-    for r in to_add:
+    adds = to_add if limit is None else to_add[:max(0, limit)]
+    added_assets: set[int] = set()
+    mattes_used: dict[str, int] = {}
+    for r in adds:
+        matte = mattes.matte_for(r["pref_matte"], r["pref_shape"], r["width"], r["height"], matte_cfg)
         placement_id = store.create_pending_placement(conn, device_id, r["derivative_id"], matte)
         try:
             data = Path(r["path"]).read_bytes()
@@ -102,9 +124,14 @@ def refresh(client: FrameClient, conn: sqlite3.Connection, *, device_id, period,
             continue
         store.set_placement_present(conn, placement_id, content_id)
         store.add_rotation_event(conn, device_id, r["asset_id"], "added", period["name"])
+        added_assets.add(r["asset_id"])
+        mattes_used[matte] = mattes_used.get(matte, 0) + 1
         added += 1
 
-    for p in (to_remove if removals_ok else []):
+    removals = to_remove if removals_ok else []
+    if limit is not None:
+        removals = sorted(removals, key=lambda p: p["asset_id"] not in added_assets)[:added]
+    for p in removals:
         try:
             if p["content_id"]:
                 client.delete(p["content_id"])
@@ -124,4 +151,5 @@ def refresh(client: FrameClient, conn: sqlite3.Connection, *, device_id, period,
                     period["name"])
     return {"desired": len(desired), "added": added, "removed": removed, "errors": errors,
             "harvested": len(harvested), "removals_skipped": not removals_ok,
+            "pending_adds": len(to_add) - len(adds), "mattes_used": mattes_used,
             "interval": period["interval"], "shuffle": period["shuffle"]}
