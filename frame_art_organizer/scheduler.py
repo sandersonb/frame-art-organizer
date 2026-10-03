@@ -16,6 +16,7 @@ from pathlib import Path
 
 from samsungtvws import exceptions
 
+from . import harvest as harvest_mod
 from . import store
 from .frame_client import FrameAsleep, FrameClient
 
@@ -71,6 +72,21 @@ def refresh(client: FrameClient, conn: sqlite3.Connection, *, device_id, period,
 
     added = removed = errors = 0
 
+    # No harvest, no evict (SPEC.md §12.4): read the user's TV-side matte edits BEFORE anything
+    # is deleted, because deleting a photo destroys its matte. A TV that can't answer
+    # (FrameAsleep/FrameTimeout) aborts the whole refresh — nothing is evicted and the daemon
+    # retries. Any other harvest failure skips only the evictions so a bug can't stall rotation.
+    harvested: list[dict] = []
+    removals_ok = True
+    try:
+        harvested = harvest_mod.harvest(client, conn, device_id)
+    except FrameAsleep:
+        raise
+    except Exception:  # noqa: BLE001
+        log.exception("refresh[%s]: matte harvest failed — skipping evictions this run",
+                      period["name"])
+        removals_ok = False
+
     for r in to_add:
         placement_id = store.create_pending_placement(conn, device_id, r["derivative_id"], matte)
         try:
@@ -87,7 +103,7 @@ def refresh(client: FrameClient, conn: sqlite3.Connection, *, device_id, period,
         store.add_rotation_event(conn, device_id, r["asset_id"], "added", period["name"])
         added += 1
 
-    for p in to_remove:
+    for p in (to_remove if removals_ok else []):
         try:
             if p["content_id"]:
                 client.delete(p["content_id"])
@@ -106,4 +122,5 @@ def refresh(client: FrameClient, conn: sqlite3.Connection, *, device_id, period,
         log.warning("refresh[%s]: nothing resident after sync — slideshow left unchanged",
                     period["name"])
     return {"desired": len(desired), "added": added, "removed": removed, "errors": errors,
+            "harvested": len(harvested), "removals_skipped": not removals_ok,
             "interval": period["interval"], "shuffle": period["shuffle"]}

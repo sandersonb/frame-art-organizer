@@ -25,9 +25,9 @@ def add_asset(conn, n=1, name=None, width=4000, height=3000, status="active") ->
     )
 
 
-def add_derivative(conn, asset_id, width=3840, height=2160, fit="cover", pv=1) -> int:
+def add_derivative(conn, asset_id, width=3840, height=2160, fit="cover", pv=1, path=None) -> int:
     return store.add_derivative(
-        conn, asset_id=asset_id, path=f"/deriv/{asset_id}_{fit}_v{pv}.jpg", sha256=f"d{asset_id:063x}",
+        conn, asset_id=asset_id, path=path or f"/deriv/{asset_id}_{fit}_v{pv}.jpg", sha256=f"d{asset_id:063x}",
         fit_mode=fit, width=width, height=height, pipeline_version=pv,
     )
 

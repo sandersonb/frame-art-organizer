@@ -9,11 +9,15 @@ Phase-2 scheduler will narrow this to a working set.
 """
 from __future__ import annotations
 
+import logging
 import sqlite3
 from pathlib import Path
 
+from . import harvest as harvest_mod
 from . import store
 from .frame_client import FrameAsleep, FrameClient
+
+log = logging.getLogger(__name__)
 
 
 def sync(client: FrameClient, conn: sqlite3.Connection, *, device_id: int,
@@ -39,9 +43,22 @@ def sync(client: FrameClient, conn: sqlite3.Connection, *, device_id: int,
 
 
 def reconcile(client: FrameClient, conn: sqlite3.Connection, device_id: int) -> dict:
-    """Diff device MY-C0002 against our `present` placements; converge and flag orphans."""
-    on_device = {item.get("content_id") for item in client.list_my_photos()}
+    """Diff device MY-C0002 against our `present` placements; converge and flag orphans.
+
+    Also harvests matte edits from the same listing (SPEC.md §12.4). A harvest failure is
+    logged and reported but never stops reconcile's own work.
+    """
+    items = client.list_my_photos()
+    on_device = {item.get("content_id") for item in items}
     on_device.discard(None)
+
+    harvested = []
+    harvest_error = None
+    try:
+        harvested = harvest_mod.harvest(client, conn, device_id, listing=items)
+    except Exception as e:  # noqa: BLE001
+        log.exception("reconcile: matte harvest failed")
+        harvest_error = type(e).__name__
 
     ours = store.present_placements(conn, device_id)
     our_ids = set()
@@ -61,4 +78,6 @@ def reconcile(client: FrameClient, conn: sqlite3.Connection, device_id: int) -> 
         "ours_present": len(ours),
         "vanished": vanished,
         "orphans": orphans,
+        "harvested": len(harvested),
+        "harvest_error": harvest_error,
     }
