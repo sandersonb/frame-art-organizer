@@ -8,6 +8,8 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timezone
 
+from . import images, mattes
+
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -241,11 +243,65 @@ def touch_placement_verified(conn, placement_id) -> None:
 
 def present_placements(conn, device_id) -> list[sqlite3.Row]:
     return conn.execute(
-        """SELECT p.id, p.content_id, d.asset_id AS asset_id
-           FROM placement p JOIN derivative d ON d.id = p.derivative_id
+        """SELECT p.id, p.content_id, p.matte AS matte, d.id AS derivative_id,
+                  d.asset_id AS asset_id, d.width AS width, d.height AS height,
+                  a.original_name AS original_name
+           FROM placement p
+           JOIN derivative d ON d.id = p.derivative_id
+           JOIN asset a ON a.id = d.asset_id
            WHERE p.device_id = ? AND p.state = 'present'""",
         (device_id,),
     ).fetchall()
+
+
+# --- matte harvest (TV -> DB), SPEC.md §12.4 -----------------------------------------------
+def set_asset_matte(conn, asset_id, matte, shape) -> None:
+    """Remember the matte the user chose on the TV for this asset (and the shape class it was
+    chosen under). Does not commit — callers batch it with the placement update."""
+    conn.execute("INSERT OR IGNORE INTO asset_policy (asset_id) VALUES (?)", (asset_id,))
+    conn.execute(
+        "UPDATE asset_policy SET matte = ?, matte_shape = ? WHERE asset_id = ?",
+        (matte, shape, asset_id),
+    )
+
+
+def set_placement_matte(conn, placement_id, matte) -> None:
+    """Record the matte currently on the TV for a placement. Does not commit."""
+    conn.execute("UPDATE placement SET matte = ? WHERE id = ?", (matte, placement_id))
+
+
+def harvest_mattes(conn, device_id, listing, *, apply=True) -> list[dict]:
+    """TV -> DB: find matte edits the user made on the TV and remember them per asset.
+
+    `listing` is the `available('MY-C0002')` result. For every placement of ours that is
+    resident, compare the matte the TV reports now with the matte we last recorded for it; a
+    difference means the user changed it in the TV's own UI (the TV wins). Only `matte_id` is
+    read — `portrait_matte_id` is ignored (SPEC.md §12.4).
+
+    Skipped: placements not in the listing (reconcile deals with those), listing items with no
+    `matte_id` key at all (unknown is not "none"), and content we didn't upload (orphans).
+    Returns one dict per change. With `apply=False` nothing is written (dry run).
+    """
+    by_id = {it.get("content_id"): it for it in (listing or []) if it.get("content_id")}
+    changes = []
+    for p in present_placements(conn, device_id):
+        item = by_id.get(p["content_id"])
+        if item is None or "matte_id" not in item:
+            continue
+        tv, old = mattes.normalize(item["matte_id"]), mattes.normalize(p["matte"])
+        if tv == old:
+            continue
+        shape = images.shape_class(p["width"], p["height"])
+        changes.append({
+            "asset_id": p["asset_id"], "placement_id": p["id"], "content_id": p["content_id"],
+            "original_name": p["original_name"], "old": old, "new": tv, "shape": shape,
+        })
+    if apply and changes:
+        with conn:  # one transaction: preference + placement stay consistent
+            for c in changes:
+                set_asset_matte(conn, c["asset_id"], c["new"], c["shape"])
+                set_placement_matte(conn, c["placement_id"], c["new"])
+    return changes
 
 
 def list_placements(conn, device_id) -> list[sqlite3.Row]:
