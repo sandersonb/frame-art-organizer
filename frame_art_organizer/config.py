@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import tomllib
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from .frame_client import FrameConfig
+from .mattes import MATTE_COLORS, ODD_ALLOWED, MatteConfig, valid_matte_string
 
 # Slideshow intervals the Frame accepts for MY-C0002 (minutes). See SAMSUNG_FRAME_API.md.
 VALID_INTERVALS = (3, 15, 60, 720, 1440, 10080)
@@ -64,6 +66,78 @@ def paths(cfg: dict, base_dir: str | Path) -> dict:
         "derivatives": resolve("derivatives", "data/derivatives"),
         "database": resolve("database", "data/state.db"),
     }
+
+
+class ConfigError(ValueError):
+    """A config.toml value is invalid. The message names the section and key."""
+
+
+@dataclass(frozen=True)
+class ImageSettings:
+    """The validated [image] section, with defaults (SPEC.md §7, §12.6)."""
+    width: int = 3840
+    height: int = 2160
+    jpeg_quality: int = 92
+    default_fit: str = "cover"        # cover | contain  (v1)   |   auto  (v2 pipeline)
+    pipeline_version: int = 1
+    crop_tolerance: float = 0.16      # trim <= this -> FILL (crop to 16:9); else FIT
+    low_res_long_edge: int = 1280     # gallery/plan-report flag only; never blocks anything
+    default_matte: str = "none"       # matte for 16:9 (FILL) photos
+    fit_matte_type: str = "flexible"  # initial matte type for non-16:9 (FIT) photos
+    fit_matte_color: str = "black"
+    auto_matte: bool = True
+
+    @property
+    def matte(self) -> MatteConfig:
+        return MatteConfig(
+            default_matte=self.default_matte,
+            fit_matte=f"{self.fit_matte_type}_{self.fit_matte_color}",
+            auto_matte=self.auto_matte,
+        )
+
+
+def image_settings(cfg: dict) -> ImageSettings:
+    """Read and validate `[image]`. Raises ConfigError (naming the key) on a bad value, so a
+    typo fails at startup instead of when a photo is uploaded to the TV."""
+    raw = cfg.get("image", {})
+    d = ImageSettings()
+
+    def bad(key, msg):
+        raise ConfigError(f"[image] {key}: {msg} (got {raw.get(key)!r})")
+
+    def number(key, kind, lo, hi=None):
+        v = raw.get(key, getattr(d, key))
+        ok = isinstance(v, (int, float)) and not isinstance(v, bool) and (kind is float or float(v).is_integer())
+        if not ok or v < lo or (hi is not None and v > hi):
+            bad(key, f"must be a number >= {lo}" + (f" and <= {hi}" if hi is not None else ""))
+        return kind(v)
+
+    fit = raw.get("default_fit", d.default_fit)
+    if fit not in ("cover", "contain", "auto"):
+        bad("default_fit", "must be one of cover, contain, auto")
+    default_matte = raw.get("default_matte", d.default_matte)
+    if not valid_matte_string(default_matte):
+        bad("default_matte", "must be 'none' or '<type>_<color>' from the TV's matte list")
+    fit_type = raw.get("fit_matte_type", d.fit_matte_type)
+    if fit_type not in ODD_ALLOWED:
+        bad("fit_matte_type", f"must be one of {', '.join(ODD_ALLOWED)} — the only types verified "
+                              "for non-16:9 photos (a wrong one can crash the TV)")
+    fit_color = raw.get("fit_matte_color", d.fit_matte_color)
+    if fit_color not in MATTE_COLORS:
+        bad("fit_matte_color", "must be one of the TV's colors: " + ", ".join(MATTE_COLORS))
+    auto = raw.get("auto_matte", d.auto_matte)
+    if not isinstance(auto, bool):
+        bad("auto_matte", "must be true or false")
+
+    return ImageSettings(
+        width=number("width", int, 1), height=number("height", int, 1),
+        jpeg_quality=number("jpeg_quality", int, 1, 100), default_fit=fit,
+        pipeline_version=number("pipeline_version", int, 1),
+        crop_tolerance=number("crop_tolerance", float, 0.0, 0.5),
+        low_res_long_edge=number("low_res_long_edge", int, 0),
+        default_matte=default_matte.strip().lower(), fit_matte_type=fit_type,
+        fit_matte_color=fit_color, auto_matte=auto,
+    )
 
 
 def schedule(cfg: dict) -> dict:
