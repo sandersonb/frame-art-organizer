@@ -117,7 +117,15 @@ _V2 = """
 ALTER TABLE collection ADD COLUMN color TEXT;
 """
 
-MIGRATIONS = [_V1, _V2]  # index+1 == version
+# --- migration 3: per-asset matte preference, harvested from the TV (additive) -----------
+# The TV is the matte editor (SPEC.md §12.4): the user's choice is read back from the TV and
+# remembered per asset so it survives the photo being rotated out and uploaded again.
+_V3 = """
+ALTER TABLE asset_policy ADD COLUMN matte TEXT;        -- NULL = no preference
+ALTER TABLE asset_policy ADD COLUMN matte_shape TEXT;  -- 'wide' | 'odd': the shape class it was chosen under
+"""
+
+MIGRATIONS = [_V1, _V2, _V3]  # index+1 == version
 
 
 def connect(path: str | Path) -> sqlite3.Connection:

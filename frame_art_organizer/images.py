@@ -33,6 +33,22 @@ except Exception:  # noqa: BLE001
 
 FRAME_W, FRAME_H = 3840, 2160
 
+_R169 = 16 / 9
+_SHAPE_TOLERANCE = 0.01   # a derivative within 1 % of 16:9 counts as 'wide'
+
+
+def shape_class(width, height) -> str | None:
+    """Coarse shape of a rendered derivative, used to scope matte preferences.
+
+    ``'wide'`` = 16:9 (±1 %) — the TV offers its full matte list for these;
+    ``'odd'``  = any other aspect — the TV offers only ``flexible``/``shadowbox``.
+    ``None`` if the size is unknown (then no preference is ever matched to it).
+    A matte chosen for one class must never be applied to the other (SPEC.md §12.3).
+    """
+    if not width or not height:
+        return None
+    return "wide" if abs(width / height - _R169) <= _SHAPE_TOLERANCE * _R169 else "odd"
+
 
 def normalize_to_frame(
     path: str | Path,

@@ -20,6 +20,8 @@ web = [
     "jinja2>=3.1",
     "python-multipart>=0.0.9",
 ]
+# Tests: `pip install -e '.[dev]'` then `pytest`. No TV needed.
+dev = ["pytest>=8"]
 
 [project.scripts]
 fao = "frame_art_organizer.cli:main"
@@ -33,3 +35,6 @@ packages = ["frame_art_organizer"]
 
 [tool.setuptools.package-data]
 frame_art_organizer = ["templates/*.html"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
