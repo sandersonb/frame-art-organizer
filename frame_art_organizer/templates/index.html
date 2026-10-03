@@ -70,7 +70,9 @@
     .card.menu-open { z-index: 30; }
     .card.selected { outline: 2px solid var(--accent); outline-offset: -1px; }
     .card .thumb { position: relative; }
-    .card .thumb img { width: 100%; aspect-ratio: 16/10; object-fit: cover; background: #0c0d11;
+    /* Show the photo as the TV will: whole (`contain`) in a 16:9 frame on a dark ground, which is
+       what a FIT photo in a matte looks like. `cover` would crop it and hide the point. */
+    .card .thumb img { width: 100%; aspect-ratio: 16/9; object-fit: contain; background: #0c0d11;
                        display: block; border-radius: 12px 12px 0 0; }
     .card .chk { position: absolute; top: 10px; left: 10px; width: 26px; height: 26px;
                  border-radius: 7px; border: 2px solid rgba(255,255,255,.85);
@@ -138,7 +140,7 @@
     .modal { background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
              width: min(520px, 100%); max-height: 88vh; overflow: auto; padding: 18px; }
     .modal.small { width: min(360px, 100%); }
-    .modal-img { width: 100%; border-radius: 10px; aspect-ratio: 16/10; object-fit: cover;
+    .modal-img { width: 100%; border-radius: 10px; aspect-ratio: 16/9; object-fit: contain;
                  background: #0c0d11; margin-bottom: 12px; }
     .kv { display: flex; justify-content: space-between; gap: 16px; padding: 6px 0;
           border-top: 1px solid var(--border); font-size: 13.5px; }
@@ -227,7 +229,7 @@
     <div class="modal" @click.stop x-show="details">
       <template x-if="details">
         <div>
-          <img class="modal-img" :src="`/thumb/${details.id}`" alt="">
+          <img class="modal-img" :src="`/thumb/${details.id}?v=${details.derivative_id || 0}`" alt="">
           <h3 x-text="details.title || details.original_name"></h3>
           <div class="kv"><span>File</span><span x-text="details.original_name"></span></div>
           <div class="kv"><span>Dimensions</span>

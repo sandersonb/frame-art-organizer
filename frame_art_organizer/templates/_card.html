@@ -2,7 +2,7 @@
 <div class="card" id="card-{{ a.id }}"
      :class="{ selected: selected({{ a.id }}), 'menu-open': menu === {{ a.id }} }">
   <div class="thumb">
-    <img src="/thumb/{{ a.id }}" loading="lazy" alt="{{ a.original_name }}">
+    <img src="/thumb/{{ a.id }}?v={{ a.d_id or 0 }}" loading="lazy" alt="{{ a.original_name }}">
     <button class="chk" :class="{ on: selected({{ a.id }}) }"
             @click.stop="toggle({{ a.id }})" title="Select">
       <svg class="ic" x-show="selected({{ a.id }})" x-cloak><use href="#ti-check"></use></svg>

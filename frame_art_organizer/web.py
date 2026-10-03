@@ -170,12 +170,12 @@ def create_app(config_path: str | None = None, run_daemon: bool | None = None) -
         c = conn()
         try:
             a = store.get_asset(c, asset_id)
-            deriv = store.get_any_derivative(c, asset_id) if a else None
+            deriv = store.get_any_derivative(c, asset_id, fit, pipeline_version) if a else None
         finally:
             c.close()
         if a is None:
             raise HTTPException(404)
-        dest = thumbs_dir / f"{a['sha256']}.jpg"
+        dest = thumbs_dir / images.thumb_name(a["sha256"], deriv["id"] if deriv else None)
         if not dest.exists():
             src = deriv["path"] if deriv else a["original_path"]
             try:
@@ -219,7 +219,7 @@ def create_app(config_path: str | None = None, run_daemon: bool | None = None) -
             a = store.get_asset(c, asset_id)
             if a is None:
                 raise HTTPException(404)
-            deriv = store.get_any_derivative(c, asset_id)
+            deriv = store.get_any_derivative(c, asset_id, fit, pipeline_version)
             cols = [dict(r) for r in store.collections_for_asset(c, asset_id)]
             placements = store.present_placements_for_asset(c, asset_id)
         finally:
@@ -231,6 +231,7 @@ def create_app(config_path: str | None = None, run_daemon: bool | None = None) -
             "imported_at": a["imported_at"], "sha256": a["sha256"], "collections": cols,
             "on_frame": [p["content_id"] for p in placements],
             "has_derivative": deriv is not None,
+            "derivative_id": deriv["id"] if deriv else None,
         }
 
     @app.get("/asset/{asset_id}/download")

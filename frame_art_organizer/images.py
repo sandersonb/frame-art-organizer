@@ -207,6 +207,13 @@ def render_to_file(src: str | Path, dest: str | Path, mode: str = "cover",
             "bytes": len(data), "plan": plan.kind if plan else None}
 
 
+def thumb_name(sha256: str, derivative_id: int | None) -> str:
+    """Cache file name of a photo's thumbnail. Keyed by the DERIVATIVE it was made from (or
+    the original, if none is rendered yet): a new render gets a new name, so a stale preview
+    — e.g. the cropped 16:9 one from the v1 pipeline — can never be served for it."""
+    return f"{sha256}-d{derivative_id}.jpg" if derivative_id else f"{sha256}-o.jpg"
+
+
 def make_thumbnail(src: str | Path, dest: str | Path, width: int = 480,
                    quality: int = 82) -> Path:
     """Write a small web thumbnail (EXIF-oriented, aspect-preserved) to `dest`."""
