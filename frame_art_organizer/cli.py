@@ -21,7 +21,7 @@ from pathlib import Path
 
 import urllib3
 
-from . import config, db, images, ingest, mattes, scheduler, store, uploader
+from . import config, db, images, ingest, mattes, purge, scheduler, store, uploader
 from . import harvest as harvest_mod
 from .frame_client import FrameAsleep, FrameClient
 
@@ -291,6 +291,49 @@ def _plan_rows(conn, img: config.ImageSettings, tolerance: float) -> list[dict]:
     return rows
 
 
+def _human(n: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+
+
+def cmd_purge_derivatives(args) -> int:
+    """Delete the old pipeline's renders once the new ones have soaked (dry run unless --apply)."""
+    conn, paths, cfg = _library(args)
+    img = config.image_settings(cfg)
+    plan = purge.build_plan(conn, Path(paths["derivatives"]), img.default_fit, img.pipeline_version,
+                            args.min_age_days)
+    orphans = purge.thumb_orphans(conn, config.thumbs_dir(paths))
+    orphan_bytes = sum(p.stat().st_size for p in orphans)
+    print(f"purge-derivatives: configured pipeline {img.default_fit} v{img.pipeline_version} · "
+          f"soak {args.min_age_days} day(s)")
+    if plan.stale_resident:
+        print(f"REFUSED: {plan.stale_resident} placement(s) on the TV are still on an older pipeline — "
+              "the migration is not finished. Finish it (fao schedule-refresh) or roll back first.")
+        return EXIT_REFUSED
+    print(f"  superseded renders to delete : {len(plan.eligible)} ({_human(plan.bytes)})")
+    kept = [(plan.too_new, f"replacement is younger than {args.min_age_days} day(s)"),
+            (plan.replacement_missing, "replacement file missing"),
+            (plan.outside_dir, "file outside the derivatives directory"),
+            (plan.newer_kept, "from a newer pipeline than configured (rolled back?)")]
+    for n, why in kept:
+        if n:
+            print(f"  kept                         : {n} — {why}")
+    print(f"  unused thumbnails to delete  : {len(orphans)} ({_human(orphan_bytes)})")
+    if not args.apply:
+        print("dry run — nothing deleted. Re-run with --apply to delete.")
+        return 0
+    res = purge.apply_plan(conn, plan)
+    for p in orphans:
+        p.unlink(missing_ok=True)
+    print(f"deleted {res['derivatives']} render(s), freed {_human(res['freed_bytes'])}; "
+          f"removed {res['history_rows']} old placement record(s) and {len(orphans)} thumbnail(s)")
+    for path, err in res["file_errors"]:
+        print(f"  could not remove {path}: {err}", file=sys.stderr)
+    return 0 if not res["file_errors"] else 1
+
+
 def cmd_plan_report(args) -> int:
     """Dry run of the v2 render plan over the library — review it before flipping default_fit."""
     conn, _, cfg = _library(args)
@@ -513,6 +556,13 @@ def build_parser() -> argparse.ArgumentParser:
     ppr.add_argument("--crop-tolerance", type=float, default=None, metavar="X",
                      help="override [image] crop_tolerance for this report")
     ppr.set_defaults(func=cmd_plan_report)
+
+    ppg = sub.add_parser("purge-derivatives",
+                         help="delete renders superseded by the current pipeline (dry run unless --apply)")
+    ppg.add_argument("--apply", action="store_true", help="actually delete (default: dry run)")
+    ppg.add_argument("--min-age-days", type=int, default=14, metavar="N",
+                     help="soak: only purge once the replacement render is at least N days old (default 14)")
+    ppg.set_defaults(func=cmd_purge_derivatives)
 
     # web UI + daemon
     ps = sub.add_parser("serve", help="run the web UI (+ scheduler daemon per config)")

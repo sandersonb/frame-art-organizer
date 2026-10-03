@@ -34,7 +34,7 @@ def create_app(config_path: str | None = None, run_daemon: bool | None = None) -
     paths = config.paths(cfg, base)
     for key in ("inbox", "originals", "derivatives"):
         paths[key].mkdir(parents=True, exist_ok=True)
-    thumbs_dir = paths["derivatives"].parent / "thumbs"
+    thumbs_dir = config.thumbs_dir(paths)
     thumbs_dir.mkdir(parents=True, exist_ok=True)
     _boot = db.open_db(paths["database"])  # ensure migrated
     store.ensure_collection_colors(_boot)  # backfill colors for pre-migration collections

@@ -68,6 +68,11 @@ def paths(cfg: dict, base_dir: str | Path) -> dict:
     }
 
 
+def thumbs_dir(paths: dict) -> Path:
+    """Where the web UI caches thumbnails (next to the derivatives; all regenerable)."""
+    return Path(paths["derivatives"]).parent / "thumbs"
+
+
 class ConfigError(ValueError):
     """A config.toml value is invalid. The message names the section and key."""
 

@@ -133,6 +133,56 @@ def rename_asset(conn, asset_id, title) -> None:
     conn.commit()
 
 
+# --- purging superseded derivatives (M4; see purge.py for the rules) -------------------------
+def superseded_derivatives(conn, fit_mode, pipeline_version) -> list[sqlite3.Row]:
+    """Derivatives that are not at the configured pipeline (nor from a newer one), whose photo has
+    one that is, and that no present/pending placement uses. Candidates only — purge.py decides."""
+    return conn.execute(
+        """SELECT old.id AS id, old.asset_id AS asset_id, old.path AS path,
+                  old.pipeline_version AS pipeline_version, old.fit_mode AS fit_mode,
+                  cur.path AS replacement_path, cur.rendered_at AS replacement_rendered_at
+           FROM derivative old
+           JOIN derivative cur ON cur.asset_id = old.asset_id
+                              AND cur.fit_mode = ? AND cur.pipeline_version = ?
+           WHERE NOT (old.fit_mode = ? AND old.pipeline_version = ?)
+             AND old.pipeline_version <= ?
+             AND NOT EXISTS (SELECT 1 FROM placement p WHERE p.derivative_id = old.id
+                             AND p.state IN ('present','pending'))
+           ORDER BY old.id""",
+        (fit_mode, pipeline_version, fit_mode, pipeline_version, pipeline_version),
+    ).fetchall()
+
+
+def stale_resident_count(conn, fit_mode, pipeline_version) -> int:
+    """Placements on the TV (or about to be) whose derivative is not at the configured pipeline."""
+    return conn.execute(
+        """SELECT COUNT(*) FROM placement p JOIN derivative d ON d.id = p.derivative_id
+           WHERE p.state IN ('present','pending')
+             AND NOT (d.fit_mode = ? AND d.pipeline_version = ?)""",
+        (fit_mode, pipeline_version),
+    ).fetchone()[0]
+
+
+def newer_derivative_count(conn, pipeline_version) -> int:
+    return conn.execute("SELECT COUNT(*) FROM derivative WHERE pipeline_version > ?",
+                        (pipeline_version,)).fetchone()[0]
+
+
+def purge_derivative(conn, derivative_id) -> int:
+    """Delete a derivative row and its dead placement history; returns how many history rows went.
+    Refuses (ValueError) if anything present or pending uses it. Does NOT commit or touch files.
+
+    The FK from placement has no cascade; non-present placements are history only (the real
+    history, rotation_event, is keyed by asset and is untouched)."""
+    live = conn.execute("SELECT COUNT(*) FROM placement WHERE derivative_id = ? "
+                        "AND state IN ('present','pending')", (derivative_id,)).fetchone()[0]
+    if live:
+        raise ValueError(f"derivative {derivative_id} is in use by {live} placement(s)")
+    n = conn.execute("DELETE FROM placement WHERE derivative_id = ?", (derivative_id,)).rowcount
+    conn.execute("DELETE FROM derivative WHERE id = ?", (derivative_id,))
+    return n
+
+
 def get_matte_pref(conn, asset_id) -> tuple:
     """(matte, matte_shape) the user chose on the TV for this asset, or (None, None)."""
     r = conn.execute("SELECT matte, matte_shape FROM asset_policy WHERE asset_id = ?", (asset_id,)).fetchone()
