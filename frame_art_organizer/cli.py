@@ -226,14 +226,30 @@ def cmd_schedule_show(args) -> int:
     for r in desired:
         print(f"  asset={r['asset_id']:<4} pinned={r['pinned']}  {r['original_name']}")
     print(f"currently resident={len(present)} → would add {len(to_add)}, remove {len(to_remove)}")
+    current = sum(1 for p in present
+                  if (p["fit_mode"], p["pipeline_version"]) == (img.default_fit, img.pipeline_version))
+    print(f"pipeline      : {img.default_fit} v{img.pipeline_version} — resident on it: "
+          f"{current}/{len(present)}" + (f", {len(present) - current} stale (a refresh swaps them)"
+                                         if len(present) > current else ""))
     return 0
 
 
+def _render_pending(conn, paths, img: config.ImageSettings) -> int:
+    """Render derivatives for photos lacking one at the configured pipeline (parity with the
+    daemon). After a pipeline_version bump this is what keeps the library from looking empty."""
+    n = ingest.render_pending(conn, paths, img.default_fit, img.pipeline_version,
+                              img.jpeg_quality, crop_tolerance=img.crop_tolerance)
+    if n:
+        print(f"rendered {n} pending derivative(s) for the current pipeline")
+    return n
+
+
 def cmd_schedule_refresh(args) -> int:
-    conn, _, cfg = _library(args)
+    conn, paths, cfg = _library(args)
     fc, _ = _client(args)
     img = config.image_settings(cfg)
     period = _active_period(cfg)
+    _render_pending(conn, paths, img)   # CPU/disk work first, before holding the TV connection
     with fc:
         device_id = _ensure_device(conn, fc)
         res = scheduler.refresh(

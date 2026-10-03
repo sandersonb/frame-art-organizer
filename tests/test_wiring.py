@@ -17,8 +17,9 @@ PERIOD = {"name": "all-day", "collections": [], "interval": 15, "shuffle": True,
 class FakeClient:
     """Stands in for FrameClient. `calls` is the ordered log of what was asked of the TV."""
 
-    def __init__(self, listing=(), list_exc=None):
+    def __init__(self, listing=(), list_exc=None, shown=None, mode="on", select_exc=None):
         self.listing, self.list_exc, self.calls, self._n = list(listing), list_exc, [], 100
+        self.shown, self.mode, self.select_exc = shown, mode, select_exc    # what's on the wall / Art Mode
 
     def list_my_photos(self):
         self.calls.append("list")
@@ -34,6 +35,19 @@ class FakeClient:
     def delete(self, content_id):
         self.calls.append(("delete", content_id))
         return True
+
+    def artmode(self):
+        self.calls.append("artmode")
+        return self.mode
+
+    def current(self):
+        self.calls.append("current")
+        return {"content_id": self.shown}
+
+    def select(self, content_id, show=True):
+        self.calls.append(("select", content_id, show))
+        if self.select_exc:
+            raise self.select_exc
 
     def set_slideshow(self, duration, shuffle=True, category_id="MY-C0002"):
         self.calls.append(("slideshow", duration))

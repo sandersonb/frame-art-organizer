@@ -49,6 +49,25 @@ def plan(conn: sqlite3.Connection, *, device_id, period, fit_mode, pipeline_vers
     return desired, to_add, to_remove, present
 
 
+def _switch_display_away(client, removing: set[str], keep: list[str]) -> None:
+    """If the photo on the wall is about to be deleted, show a surviving one first.
+
+    Deleting the displayed item flickers (API notes §8). Only acts when the TV is in Art Mode:
+    otherwise nothing is visible, and `select(show=False)` must never pull someone out of
+    watching TV. Purely cosmetic, so ANY failure is swallowed — the real deletes that follow
+    decide whether the TV is reachable.
+    """
+    if not removing or not keep:
+        return
+    try:
+        if client.artmode() != "on":
+            return
+        if client.current().get("content_id") in removing:
+            client.select(keep[0], show=False)
+    except Exception:  # noqa: BLE001
+        log.debug("could not switch the display away before deleting (cosmetic)", exc_info=True)
+
+
 def _apply_slideshow(client: FrameClient, period) -> None:
     """Set the MY-C0002 slideshow; if the interval is rejected, fall back to 3 min."""
     try:
@@ -131,6 +150,12 @@ def refresh(client: FrameClient, conn: sqlite3.Connection, *, device_id, period,
     removals = to_remove if removals_ok else []
     if limit is not None:
         removals = sorted(removals, key=lambda p: p["asset_id"] not in added_assets)[:added]
+    if removals:
+        remove_ids = {p["content_id"] for p in removals if p["content_id"]}
+        keep = [p["content_id"] for p in sorted(store.present_placements(conn, device_id),
+                                                key=lambda p: p["id"], reverse=True)
+                if p["content_id"] and p["content_id"] not in remove_ids]   # newest first
+        _switch_display_away(client, remove_ids, keep)
     for p in removals:
         try:
             if p["content_id"]:
