@@ -291,6 +291,20 @@ SPEC.md  SAMSUNG_FRAME_API.md  ORGANIZER_UI_SPEC.md
 ```
 
 ## Notes & troubleshooting
+- **Capture a wedged Art API:** run `fao info --diagnose > /tmp/frame-info-diagnostic.log 2>&1`
+  and share that file. This read-only probe logs UTC timestamps and elapsed time for TCP,
+  REST device info, the TLS/WebSocket upgrade, Samsung's `ms.channel.connect` / `ms.channel.ready`
+  events, and the Art version/status/photo-list requests. It emits all-thread Python stacks every
+  10 seconds while still running (including stuck cleanup/interpreter shutdown). It never logs
+  pairing tokens, WebSocket URLs or raw response bodies; the ordinary device summary is included.
+  It makes **one connection attempt, without retries**, in a separate process that is killed after
+  **60 seconds** if necessary (exit code 124). Use `--diagnostic-timeout 90` for a longer capture.
+  Normal `fao info` is unchanged. A successful REST reply does **not** prove the Art API is healthy:
+  if the four device-info lines appear but no `art api` line, the subsequent Art request stalled.
+  Prefer one capture during a natural failure, not repeated probes to induce a wedge. Capture once
+  before stopping the daemon to preserve the failure, then stop it to prevent background retries;
+  a second capture, if needed, can show whether the problem persists without that traffic. Also
+  record whether restarting only the Pi service fixes it, or only power-cycling the One Connect box.
 - **The scheduler only acts when the TV is awake.** Asleep = a clean skip; a boundary
   crossed during sleep is applied on the next wake. This is by design and can't be
   bypassed (the API port is closed while the panel sleeps).

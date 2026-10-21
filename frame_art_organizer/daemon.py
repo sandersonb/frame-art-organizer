@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import html
 import logging
+import math
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 from . import config, db, ingest, scheduler, store
@@ -51,6 +53,20 @@ class Daemon:
         self._last_refresh: datetime | None = None
         self._last_harvest: datetime | None = None
         self._was_reachable: bool | None = None
+        self._wake_pending = False
+        self._failure_count = 0
+        self._retry_at = 0.0
+        self.retry_initial = float(dcfg.get("retry_initial_seconds", 300))
+        self.retry_max = float(dcfg.get("retry_max_seconds", 1800))
+        if (not math.isfinite(self.retry_initial) or not math.isfinite(self.retry_max)
+                or self.retry_initial <= 0 or self.retry_max < self.retry_initial):
+            raise ValueError("[daemon] retry delays must be finite, positive, and max >= initial")
+
+    def _back_off(self, reason):
+        self._failure_count += 1
+        delay = min(self.retry_max, self.retry_initial * 2 ** min(self._failure_count - 1, 20))
+        self._retry_at = time.monotonic() + delay
+        log.warning("TV work paused for %ss (%s; consecutive failures=%s)", delay, reason, self._failure_count)
 
     def stop(self) -> None:
         self._stop.set()
@@ -79,13 +95,17 @@ class Daemon:
                 self._tick_once()
             except Exception:  # noqa: BLE001 - a bad tick must never kill the loop
                 log.exception("daemon tick error")
+                self._back_off("tick failure")
             self._stop.wait(self.tick)
         log.info("daemon stopped")
 
     def _tick_once(self) -> None:
+        if time.monotonic() < self._retry_at:
+            return  # No TCP probes, identity calls, harvests or refreshes during cooldown.
         fc = FrameClient(config.frame_config(self.cfg, self.base))
         reachable = fc.is_reachable()
         woke = reachable and self._was_reachable is False
+        self._wake_pending = self._wake_pending or woke
         self._was_reachable = reachable
         if not reachable:
             return  # asleep/off — skip (and cannot wake the room)
@@ -96,11 +116,12 @@ class Daemon:
                or self._last_refresh is None
                or (now - self._last_refresh) >= self.refresh_interval)
         harvest_due = self._harvest_due(now)
-        if not (due or woke or harvest_due):
+        if not (due or self._wake_pending or harvest_due):
             return  # awake, nothing to do this tick
 
         conn = db.open_db(self.paths["database"])
         try:
+            store.require_resolved_uploads(conn, host=config.frame_config(self.cfg, self.base).host)
             if due:
                 self._render_pending(conn)   # CPU/disk work: do it before holding the TV connection
             with fc:
@@ -110,16 +131,22 @@ class Daemon:
                         fc, conn, device_id=device_id, period=period,
                         fit_mode=self.fit, pipeline_version=self.pv, matte_cfg=self.matte_cfg,
                     )
+                    if res.get("errors", 0):
+                        self._back_off("incomplete refresh")
+                        log.warning("refresh[%s] incomplete: %s", period["name"],
+                                    {k: v for k, v in res.items() if k != "uploads"})
+                        return
                     self._applied_period = period["name"]
                     self._last_refresh = now
                     self._last_harvest = now  # refresh harvests first, so this counts
                     log.info("refresh[%s] %s", period["name"],
                              {k: v for k, v in res.items() if k != "uploads"})
                 else:
-                    if woke:
+                    if self._wake_pending:
                         fc.set_slideshow(duration=period["interval"], shuffle=period["shuffle"])
                         log.info("woke → re-asserted slideshow (%s, %sm shuffle=%s)",
-                                 period["name"], period["interval"], period["shuffle"])
+                                  period["name"], period["interval"], period["shuffle"])
+                        self._wake_pending = False
                     if harvest_due:
                         # Attempt-based: a failing TV backs off to the next interval rather
                         # than being retried every tick.
@@ -127,8 +154,14 @@ class Daemon:
                         changes = harvest_mod.harvest(fc, conn, device_id)
                         if changes:
                             log.info("harvest: recorded %d matte edit(s) made on the TV", len(changes))
+            self._wake_pending = False
+            self._failure_count = 0
+            self._retry_at = 0.0
         except FrameAsleep as e:
-            log.info("TV became unreachable mid-tick (%s); will retry", type(e).__name__)
+            self._back_off(type(e).__name__)
+        except store.UploadResolutionRequired as e:
+            self._back_off("unresolved upload")
+            log.warning("%s", e)
         finally:
             conn.close()
 

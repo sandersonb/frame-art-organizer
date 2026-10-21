@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Local library + scheduler that drives a Samsung The Frame's Art Mode over the LAN"
 requires-python = ">=3.11"
 dependencies = [
-    "samsungtvws>=3.0.6",
+    "samsungtvws==3.0.6",
     "Pillow>=10",
 ]
 

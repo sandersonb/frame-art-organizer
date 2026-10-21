@@ -147,7 +147,7 @@ def superseded_derivatives(conn, fit_mode, pipeline_version) -> list[sqlite3.Row
            WHERE NOT (old.fit_mode = ? AND old.pipeline_version = ?)
              AND old.pipeline_version <= ?
              AND NOT EXISTS (SELECT 1 FROM placement p WHERE p.derivative_id = old.id
-                             AND p.state IN ('present','pending'))
+                              AND (p.state IN ('present','pending') OR p.upload_outcome='uncertain'))
            ORDER BY old.id""",
         (fit_mode, pipeline_version, fit_mode, pipeline_version, pipeline_version),
     ).fetchall()
@@ -157,7 +157,7 @@ def stale_resident_count(conn, fit_mode, pipeline_version) -> int:
     """Placements on the TV (or about to be) whose derivative is not at the configured pipeline."""
     return conn.execute(
         """SELECT COUNT(*) FROM placement p JOIN derivative d ON d.id = p.derivative_id
-           WHERE p.state IN ('present','pending')
+            WHERE (p.state IN ('present','pending') OR p.upload_outcome='uncertain')
              AND NOT (d.fit_mode = ? AND d.pipeline_version = ?)""",
         (fit_mode, pipeline_version),
     ).fetchone()[0]
@@ -175,7 +175,8 @@ def purge_derivative(conn, derivative_id) -> int:
     The FK from placement has no cascade; non-present placements are history only (the real
     history, rotation_event, is keyed by asset and is untouched)."""
     live = conn.execute("SELECT COUNT(*) FROM placement WHERE derivative_id = ? "
-                        "AND state IN ('present','pending')", (derivative_id,)).fetchone()[0]
+                         "AND (state IN ('present','pending') OR upload_outcome='uncertain')",
+                         (derivative_id,)).fetchone()[0]
     if live:
         raise ValueError(f"derivative {derivative_id} is in use by {live} placement(s)")
     n = conn.execute("DELETE FROM placement WHERE derivative_id = ?", (derivative_id,)).rowcount
@@ -263,6 +264,37 @@ def ensure_device(conn: sqlite3.Connection, *, name, host, duid=None, api_versio
 
 
 # --- placements ------------------------------------------------------------------
+class UploadResolutionRequired(RuntimeError):
+    """An unfinished or ambiguous upload must be reviewed before further rotation."""
+
+
+def unresolved_uploads(conn, device_id=None, *, host=None):
+    where = "(p.state='pending' OR p.upload_outcome='uncertain')"
+    args = []
+    if device_id is not None:
+        where += " AND p.device_id=?"
+        args.append(device_id)
+    if host is not None:
+        where += " AND dev.host=?"
+        args.append(host)
+    return conn.execute(
+        f"""SELECT p.*, d.asset_id, d.width, d.height, a.original_name, a.captured_at,
+                   dev.host, dev.duid
+            FROM placement p JOIN derivative d ON d.id=p.derivative_id
+            JOIN asset a ON a.id=d.asset_id JOIN device dev ON dev.id=p.device_id
+            WHERE {where} ORDER BY p.id""", args,
+    ).fetchall()
+
+
+def require_resolved_uploads(conn, device_id=None, *, host=None):
+    pending = unresolved_uploads(conn, device_id, host=host)
+    if pending:
+        ids = ",".join(str(p["id"]) for p in pending)
+        raise UploadResolutionRequired(
+            f"rotation paused: unresolved upload placement(s) {ids}; review with fao upload-resolve"
+        )
+
+
 def derivatives_to_upload(conn: sqlite3.Connection, device_id, fit_mode,
                           pipeline_version) -> list[sqlite3.Row]:
     """Current derivatives of active assets with no present/pending placement here."""
@@ -278,7 +310,7 @@ def derivatives_to_upload(conn: sqlite3.Connection, device_id, fit_mode,
              AND NOT EXISTS (
                SELECT 1 FROM placement p
                WHERE p.derivative_id = d.id AND p.device_id = ?
-                 AND p.state IN ('present','pending'))
+                  AND (p.state IN ('present','pending') OR p.upload_outcome='uncertain'))
            ORDER BY a.imported_at""",
         (fit_mode, pipeline_version, device_id),
     ).fetchall()
@@ -286,23 +318,34 @@ def derivatives_to_upload(conn: sqlite3.Connection, device_id, fit_mode,
 
 def create_pending_placement(conn, device_id, derivative_id, matte) -> int:
     cur = conn.execute(
-        "INSERT INTO placement (device_id, derivative_id, matte, state) VALUES (?,?,?,'pending')",
-        (device_id, derivative_id, matte),
+        """INSERT INTO placement (device_id, derivative_id, matte, state, upload_outcome, upload_attempted_at)
+           SELECT ?,?,?,'pending','in_flight',?
+           WHERE NOT EXISTS (SELECT 1 FROM placement WHERE device_id=?
+                             AND (state='pending' OR upload_outcome='uncertain'))""",
+        (device_id, derivative_id, matte, now(), device_id),
     )
     conn.commit()
+    if cur.rowcount != 1:
+        require_resolved_uploads(conn, device_id)
     return cur.lastrowid
 
 
 def set_placement_present(conn, placement_id, content_id) -> None:
     conn.execute(
-        "UPDATE placement SET content_id=?, state='present', uploaded_at=?, last_verified_at=? WHERE id=?",
+        """UPDATE placement SET content_id=?, state='present', uploaded_at=?, last_verified_at=?,
+           upload_outcome='acknowledged' WHERE id=?""",
         (content_id, now(), now(), placement_id),
     )
     conn.commit()
 
 
 def set_placement_error(conn, placement_id) -> None:
-    conn.execute("UPDATE placement SET state='error' WHERE id=?", (placement_id,))
+    conn.execute("UPDATE placement SET state='error', upload_outcome='not_uploaded' WHERE id=?", (placement_id,))
+    conn.commit()
+
+
+def set_placement_uncertain(conn, placement_id):
+    conn.execute("UPDATE placement SET upload_outcome='uncertain' WHERE id=?", (placement_id,))
     conn.commit()
 
 

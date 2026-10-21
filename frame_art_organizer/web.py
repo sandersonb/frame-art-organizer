@@ -71,9 +71,12 @@ def create_app(config_path: str | None = None, run_daemon: bool | None = None) -
                     for p in placements:
                         if p["content_id"]:
                             try:
-                                fc.delete(p["content_id"])
+                                if not fc.delete(p["content_id"]):
+                                    continue
+                            except FrameAsleep:
+                                break
                             except Exception:  # noqa: BLE001
-                                pass
+                                continue
                         store.set_placement_deleted(c, p["id"])
                         store.add_rotation_event(c, p["device_id"], asset_id, "removed", "web-delete")
             except FrameAsleep:

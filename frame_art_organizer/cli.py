@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import html
+import math
 import sys
 from pathlib import Path
 
@@ -167,6 +168,56 @@ def cmd_placements(args) -> int:
         print(f"{p['id']:>4}  {p['state']:<17} {str(p['content_id'] or '-'):<10} "
               f"matte={p['matte']:<6} asset={p['asset_id']}  {p['original_name']}")
     return 0
+
+
+def cmd_upload_resolve(args) -> int:
+    """List uncertain uploads locally, or resolve one on explicit operator instruction."""
+    conn, _, cfg = _library(args)
+    try:
+        rows = store.unresolved_uploads(conn)
+        if args.placement_id is None:
+            if args.content_id or args.not_uploaded:
+                print("a placement_id is required to resolve an upload", file=sys.stderr)
+                return EXIT_REFUSED
+            for row in rows:
+                print(f"{row['id']:>4} asset={row['asset_id']} {row['original_name']} "
+                      f"{row['width']}x{row['height']} matte={row['matte']} "
+                      f"date={row['captured_at'] or '-'} outcome={row['upload_outcome'] or 'unfinished'}")
+            if not rows:
+                print("(no unresolved uploads)")
+            return 0
+        row = next((r for r in rows if r["id"] == args.placement_id), None)
+        if row is None:
+            print("placement is not an unresolved upload", file=sys.stderr)
+            return EXIT_REFUSED
+        if not (args.content_id or args.not_uploaded):
+            print("choose --content-id ID or --not-uploaded after inspecting the TV", file=sys.stderr)
+            return EXIT_REFUSED
+        if args.not_uploaded:
+            store.set_placement_error(conn, row["id"])
+            print(f"placement {row['id']}: operator confirmed not uploaded; another attempt is permitted")
+            return 0
+        if conn.execute("SELECT 1 FROM placement WHERE device_id=? AND content_id=?",
+                        (row["device_id"], args.content_id)).fetchone():
+            print("content_id is already recorded; refusing to attach it to another placement", file=sys.stderr)
+            return EXIT_REFUSED
+        fc, _ = _client(args)
+        with fc:
+            info = fc.device_info().get("device", {})
+            if (fc.cfg.host != row["host"]
+                    or (row["duid"] and info.get("duid") != row["duid"])):
+                print("configured TV does not match this placement", file=sys.stderr)
+                return EXIT_REFUSED
+            item = next((p for p in fc.list_my_photos() if p.get("content_id") == args.content_id), None)
+        if item is None or (int(item.get("width", 0)), int(item.get("height", 0))) != (row["width"], row["height"]):
+            print("content_id is absent from My Photos or its dimensions do not match", file=sys.stderr)
+            return EXIT_REFUSED
+        store.set_placement_present(conn, row["id"], args.content_id)
+        store.add_rotation_event(conn, row["device_id"], row["asset_id"], "added", "operator-resolution")
+        print(f"placement {row['id']}: recorded operator-selected {args.content_id}; no TV changes made")
+        return 0
+    finally:
+        conn.close()
 
 
 # ---- collections & policy (local) ----
@@ -401,7 +452,15 @@ def cmd_ping(args) -> int:
 
 
 def cmd_info(args) -> int:
+    if getattr(args, "diagnose", False):
+        from .diagnostics import run_info
+        return run_info(args.config, timeout=args.diagnostic_timeout)
     fc, _ = _client(args)
+    return _print_info(fc)
+
+
+def _print_info(fc) -> int:
+    """Shared summary for the normal command and the isolated diagnostic probe."""
     with fc:
         dev = fc.device_info().get("device", {})
         print(f"name        : {html.unescape(dev.get('name', ''))}")
@@ -487,6 +546,13 @@ def cmd_delete(args) -> int:
     return 0
 
 
+def _positive_seconds(value: str) -> float:
+    seconds = float(value)
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise argparse.ArgumentTypeError("must be a finite number greater than zero")
+    return seconds
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="fao", description="Frame Art Organizer")
     p.add_argument("--config", default=str(config.DEFAULT_CONFIG_PATH),
@@ -494,7 +560,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
 
     sub.add_parser("ping", help="is the TV reachable?").set_defaults(func=cmd_ping)
-    sub.add_parser("info", help="device + art-api summary").set_defaults(func=cmd_info)
+    pi = sub.add_parser("info", help="device + art-api summary")
+    pi.add_argument("--diagnose", action="store_true",
+                    help="isolated read-only probe with sanitized stages and stalled-thread stacks")
+    pi.add_argument("--diagnostic-timeout", type=_positive_seconds, default=60.0, metavar="SECONDS",
+                    help="hard deadline for --diagnose, including cleanup (default: 60)")
+    pi.set_defaults(func=cmd_info)
     sub.add_parser("current", help="what's on the wall").set_defaults(func=cmd_current)
     sub.add_parser("list", help="uploaded photos").set_defaults(func=cmd_list)
 
@@ -527,6 +598,13 @@ def build_parser() -> argparse.ArgumentParser:
     ph.add_argument("--dry-run", action="store_true", help="show what would be recorded; write nothing")
     ph.set_defaults(func=cmd_harvest)
     sub.add_parser("placements", help="list recorded placements").set_defaults(func=cmd_placements)
+    pur = sub.add_parser("upload-resolve", help="review uncertain uploads (stop scheduler before resolution); never changes TV contents")
+    pur.add_argument("placement_id", type=int, nargs="?")
+    resolution = pur.add_mutually_exclusive_group()
+    resolution.add_argument("--content-id", help="operator-identified photo already on the TV")
+    resolution.add_argument("--not-uploaded", action="store_true",
+                            help="operator confirms the upload did not land; permit a new attempt")
+    pur.set_defaults(func=cmd_upload_resolve)
 
     # collections & policy (local)
     sub.add_parser("collections", help="list collections").set_defaults(func=cmd_collections)
@@ -585,8 +663,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return args.func(args)
     except FrameAsleep as e:
-        print(f"TV asleep: {e}", file=sys.stderr)
+        print(f"TV unavailable: {e}", file=sys.stderr)
         return EXIT_ASLEEP
+    except store.UploadResolutionRequired as e:
+        print(str(e), file=sys.stderr)
+        return EXIT_REFUSED
 
 
 if __name__ == "__main__":

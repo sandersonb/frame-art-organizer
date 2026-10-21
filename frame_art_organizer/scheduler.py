@@ -18,7 +18,7 @@ from samsungtvws import exceptions
 
 from . import harvest as harvest_mod
 from . import mattes, store
-from .frame_client import FrameAsleep, FrameClient
+from .frame_client import FrameAsleep, FrameClient, FrameUploadUncertain
 
 log = logging.getLogger(__name__)
 
@@ -54,8 +54,8 @@ def _switch_display_away(client, removing: set[str], keep: list[str]) -> None:
 
     Deleting the displayed item flickers (API notes §8). Only acts when the TV is in Art Mode:
     otherwise nothing is visible, and `select(show=False)` must never pull someone out of
-    watching TV. Purely cosmetic, so ANY failure is swallowed — the real deletes that follow
-    decide whether the TV is reachable.
+    watching TV. Rejected cosmetic changes are ignored, but transport failures abort the
+    pass so the daemon can back off instead of immediately attempting another operation.
     """
     if not removing or not keep:
         return
@@ -64,6 +64,8 @@ def _switch_display_away(client, removing: set[str], keep: list[str]) -> None:
             return
         if client.current().get("content_id") in removing:
             client.select(keep[0], show=False)
+    except FrameAsleep:
+        raise  # A transport failure is not cosmetic; stop poking an unhealthy TV.
     except Exception:  # noqa: BLE001
         log.debug("could not switch the display away before deleting (cosmetic)", exc_info=True)
 
@@ -91,6 +93,7 @@ def refresh(client: FrameClient, conn: sqlite3.Connection, *, device_id, period,
     most that many photos this run and evict no more than were added, so the set never shrinks;
     stale versions of photos just re-added are evicted first.
     """
+    store.require_resolved_uploads(conn, device_id)
     desired, to_add, to_remove, _ = plan(
         conn, device_id=device_id, period=period,
         fit_mode=fit_mode, pipeline_version=pipeline_version,
@@ -139,17 +142,29 @@ def refresh(client: FrameClient, conn: sqlite3.Connection, *, device_id, period,
         pref_matte, pref_shape = prefs.get(r["asset_id"], (None, None))
         matte = mattes.matte_for(pref_matte, pref_shape, r["width"], r["height"], matte_cfg)
         placement_id = store.create_pending_placement(conn, device_id, r["derivative_id"], matte)
+        log.info("upload.begin placement=%s asset=%s file=%s", placement_id, r["asset_id"], r["original_name"])
         try:
             data = Path(r["path"]).read_bytes()
+            log.info("upload.prepared placement=%s asset=%s bytes=%s size=%sx%s matte=%s",
+                     placement_id, r["asset_id"], len(data), r["width"], r["height"], matte)
             content_id = client.upload_jpeg(data, matte=matte, date=r["captured_at"])
-        except FrameAsleep:
-            store.set_placement_error(conn, placement_id)
+        except FrameUploadUncertain:
+            store.set_placement_uncertain(conn, placement_id)
+            log.warning("upload.uncertain placement=%s asset=%s; automatic replay blocked", placement_id, r["asset_id"])
             raise
-        except Exception:  # noqa: BLE001
+        except FrameAsleep as exc:
             store.set_placement_error(conn, placement_id)
+            log.warning("upload.not_submitted placement=%s asset=%s error=%s",
+                        placement_id, r["asset_id"], type(exc).__name__)
+            raise
+        except Exception as exc:  # noqa: BLE001
+            store.set_placement_error(conn, placement_id)
+            log.warning("upload.failed placement=%s asset=%s error=%s",
+                        placement_id, r["asset_id"], type(exc).__name__)
             errors += 1
             continue
         store.set_placement_present(conn, placement_id, content_id)
+        log.info("upload.recorded placement=%s asset=%s content_id=%s", placement_id, r["asset_id"], content_id)
         store.add_rotation_event(conn, device_id, r["asset_id"], "added", period["name"])
         added_assets.add(r["asset_id"])
         mattes_used[matte] = mattes_used.get(matte, 0) + 1
@@ -157,6 +172,7 @@ def refresh(client: FrameClient, conn: sqlite3.Connection, *, device_id, period,
                         "size": (r["width"], r["height"]), "matte": matte})
         added += 1
 
+    removals_ok = removals_ok and errors == 0
     removals = to_remove if removals_ok else []
     if limit is not None:
         removals = sorted(removals, key=lambda p: p["asset_id"] not in added_assets)[:added]
@@ -169,11 +185,16 @@ def refresh(client: FrameClient, conn: sqlite3.Connection, *, device_id, period,
     for p in removals:
         try:
             if p["content_id"]:
-                client.delete(p["content_id"])
+                if not client.delete(p["content_id"]):
+                    log.warning("delete.unconfirmed placement=%s content_id=%s; retained for retry", p["id"], p["content_id"])
+                    errors += 1
+                    continue
         except FrameAsleep:
             raise
-        except Exception:  # noqa: BLE001 - a failed evict shouldn't sink the pass
-            pass
+        except Exception as exc:  # noqa: BLE001
+            log.warning("delete.failed placement=%s error=%s; retained for retry", p["id"], type(exc).__name__)
+            errors += 1
+            continue
         store.set_placement_deleted(conn, p["id"])
         store.add_rotation_event(conn, device_id, p["asset_id"], "removed", period["name"])
         removed += 1

@@ -33,7 +33,13 @@ def add_derivative(conn, asset_id, width=3840, height=2160, fit="cover", pv=1, p
 
 
 def add_placement(conn, device_id, derivative_id, content_id, matte="none", state="present") -> int:
-    pid = store.create_pending_placement(conn, device_id, derivative_id, matte)
+    # Seed arbitrary historical states; the production upload claim deliberately
+    # refuses a second in-flight upload, which is not what this fixture simulates.
+    pid = conn.execute(
+        "INSERT INTO placement(device_id,derivative_id,matte,state) VALUES (?,?,?,'pending')",
+        (device_id, derivative_id, matte),
+    ).lastrowid
+    conn.commit()
     if state == "present":
         store.set_placement_present(conn, pid, content_id)
     elif state == "deleted_on_device":

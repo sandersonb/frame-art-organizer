@@ -125,7 +125,17 @@ ALTER TABLE asset_policy ADD COLUMN matte TEXT;        -- NULL = no preference
 ALTER TABLE asset_policy ADD COLUMN matte_shape TEXT;  -- 'wide' | 'odd': the shape class it was chosen under
 """
 
-MIGRATIONS = [_V1, _V2, _V3]  # index+1 == version
+_V4 = """
+ALTER TABLE placement ADD COLUMN upload_outcome TEXT
+  CHECK (upload_outcome IN ('in_flight','uncertain','acknowledged','not_uploaded'));
+ALTER TABLE placement ADD COLUMN upload_attempted_at TEXT;
+-- Old error/pending rows did not distinguish rejected uploads from lost replies.
+-- Preserve their states/history, but block automatic replay until operator review.
+UPDATE placement SET upload_outcome='uncertain'
+  WHERE state IN ('pending','error','present') AND content_id IS NULL;
+"""
+
+MIGRATIONS = [_V1, _V2, _V3, _V4]  # index+1 == version
 
 
 def connect(path: str | Path) -> sqlite3.Connection:

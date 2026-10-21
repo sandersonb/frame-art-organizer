@@ -49,6 +49,10 @@ def frame_config(cfg: dict, base_dir: str | Path) -> FrameConfig:
         token_file=str(token.resolve()),
         name=f.get("name", "FrameArtOrganizer"),
         connect_timeout=float(f.get("connect_timeout", 3.0)),
+        ws_timeout=float(f.get("ws_timeout", 60.0)),
+        ws_call_timeout=float(f.get("ws_call_timeout", 20.0)),
+        connect_retries=int(f.get("connect_retries", 2)),
+        connect_retry_delay=float(f.get("connect_retry_delay", 1.0)),
     )
 
 
