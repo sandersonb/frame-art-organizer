@@ -15,7 +15,7 @@ originals, renders Frame-ready copies, uploads them to the Frame's *My Photos*, 
 keeps a curated rotation cycling on the wall — themed and refreshed over time, with no
 manual fiddling.
 
-**Principle.** *The Pi curates; the TV cycles.* We drive the Frame's **native
+**Principle.** *The host curates; the TV cycles.* We drive the Frame's **native
 slideshow** over our uploaded set rather than pushing HDMI or acting as the slideshow
 clock. This preserves the Frame's low-power/ambient behavior and the remote's "next".
 
@@ -32,10 +32,10 @@ Frame's motion/brightness settings; in-UI TV control (show-now/pin) — deferred
 
 | Area | Decision | Rationale |
 |---|---|---|
-| Host / process | **Raspberry Pi, single `systemd` daemon** | Always-on to catch wake windows; serializes SQLite writes in-process |
+| Host / process | **Always-on host, single daemon; optional `systemd` service on Linux** | No particular host hardware is required; serializes SQLite writes in-process |
 | Ingest | **Web UI** (upload/view/delete/categorize); folder scan optional | Works on mobile via a file picker; SMB is awkward on phones |
-| Web stack | **FastAPI + HTMX/Jinja**, LAN-only, built after the scheduler | Server-rendered, no build step, Pi-friendly |
-| Control model | **Model B:** upload a set, TV runs the slideshow | Robust; survives Pi downtime; honors remote "next"; can't wake the room |
+| Web stack | **FastAPI + HTMX/Jinja**, LAN-only, built after the scheduler | Server-rendered, no build step, lightweight |
+| Control model | **Model B:** upload a set, TV runs the slideshow | Robust; survives host downtime; honors remote "next"; can't wake the room |
 | Rotation scope | **`MY-C0002` (My Photos) only** | No Favourites split in v1 — don't overcomplicate |
 | Orphans | **Leave & flag** | Never delete outside content; accept it *may* appear in rotation (category-scoped slideshow) |
 | Policy location | **Rules in `config.toml`, overrides in DB** | Config = reviewable policy; DB = runtime facts |
@@ -44,7 +44,7 @@ Frame's motion/brightness settings; in-UI TV control (show-now/pin) — deferred
 | Titles | **Field kept in model; not set on TV (yet)** | No API/known path today; pending research |
 | Pixels *(v2)* | **Native resolution, downscale-only — never upscale** | Upscaling adds no detail and bloats files; the TV scales for the panel itself (API notes §7.2) |
 | Fit *(v2)* | **FILL** (centered crop to exact 16:9) when ≤ `crop_tolerance` is trimmed, else **FIT** (native aspect, no crop, no padding) | Near-16:9 stays full-bleed; portraits/4:3/squares show whole instead of a middle band |
-| Matte *(v2)* | **The TV owns the matte UX.** The Pi sets an *initial* matte at upload and **harvests** user changes (TV wins) | `change_matte` is broken (`-7`); the TV UI is the editor and read-back works (API notes §7.4–7.5) |
+| Matte *(v2)* | **The TV owns the matte UX.** The host sets an *initial* matte at upload and **harvests** user changes (TV wins) | `change_matte` is broken (`-7`); the TV UI is the editor and read-back works (API notes §7.4–7.5) |
 | Matte safety *(v2)* | **Only upload matte types valid for the derivative's shape; no harvest ⇒ no evict** | A mismatched matte crashed the TV (API notes §7.6); eviction destroys the TV-side edit |
 
 ---
@@ -52,7 +52,7 @@ Frame's motion/brightness settings; in-UI TV control (show-now/pin) — deferred
 ## 3. Architecture
 
 ```
-   SMB share (inbox)                         Raspberry Pi (systemd daemon)
+   SMB share (inbox)                         Organizer host (daemon)
    family drops files                 ┌──────────────────────────────────────────┐
         │                             │  ingest → render → upload/reconcile      │
         ▼                             │  scheduler → set slideshow config        │
@@ -66,11 +66,11 @@ Frame's motion/brightness settings; in-UI TV control (show-now/pin) — deferred
 ```
 
 Two loops at very different cadences:
-- **Pi (slow, deferrable, reachability-gated):** ingest, render, compose the desired
+- **Host (slow, deferrable, reachability-gated):** ingest, render, compose the desired
   set, reconcile it onto the TV, set the slideshow config. Runs on ingest events and
   schedule boundaries; skips silently when the TV is asleep.
 - **TV (fast, autonomous):** cycles the resident `MY-C0002` set at the configured
-  interval. Works with the Pi disconnected; honors the remote.
+  interval. Works with the host disconnected; honors the remote.
 
 ---
 
@@ -223,13 +223,13 @@ Reachability-gated wrapper over `samsungtvws`. Hardening required by the API not
 - Ops: `device_info, api_version, artmode, current, list_my_photos, upload_jpeg(date=…),
   select, delete, set_slideshow(duration, shuffle)`. All raise `FrameAsleep` when gated out.
 
-### 5.2 Image pipeline (`images.py`) — *v1 built; v2 planned (§12)*
+### 5.2 Image pipeline (`images.py`) — *legacy v1 and native-resolution v2 (§12)*
 Any input (JPEG/PNG/WebP/TIFF/HEIC) → JPEG, EXIF-transposed first.
-- **v1 (current, `pipeline_version = 1`):** always exactly **3840×2160** via `cover`
+- **v1 (legacy, `pipeline_version = 1`):** always exactly **3840×2160** via `cover`
   (crop-fill) or `contain` (letterbox). That **upscales** anything smaller (×4.8 for an
   800×600) and crops portraits/squares to a middle band (a 2:3 portrait keeps 38 % of its
   pixels).
-- **v2 (planned, `pipeline_version = 2`, §12):** **native resolution, downscale-only**,
+- **v2 (`pipeline_version = 2`, §12):** **native resolution, downscale-only**,
   with a per-photo plan chosen by a pure function of the image's dimensions — **FILL**
   (centered crop to exact 16:9 when the trim is ≤ `crop_tolerance`) or **FIT** (native
   aspect; no crop, no padding). Matte handling: §12.3.
@@ -325,16 +325,16 @@ reachable; scheduler = on period boundary + on ingest + on wake; a lightweight
 ## 7. Configuration (`config.toml`)
 ```toml
 [frame]
-host = "192.168.1.XXX"
+host = "tv.example"       # placeholder: set your TV's hostname or address in untracked config.toml
 port = 8002
 token_file = ".token"
 connect_timeout = 3.0
 
 [paths]
-inbox       = "/srv/frame/inbox"        # SMB share mount
-originals   = "/srv/frame/originals"    # preserved archive
-derivatives = "/srv/frame/derivatives"  # rendered 4K JPEGs
-database    = "/srv/frame/state.db"
+inbox       = "data/inbox"        # optional shared-folder mount
+originals   = "data/originals"    # preserved archive
+derivatives = "data/derivatives"  # rendered JPEGs
+database    = "data/state.db"
 
 [image]
 width = 3840              # panel size — the *maximum* output size in v2, not a target
@@ -367,7 +367,7 @@ Rules (periods, collections, intervals, sizes) live here. Only **runtime overrid
 ---
 
 ## 8. Operational concerns
-- **Sleep/wake:** all device work gated on reachability; unreachable = normal. The Pi
+- **Sleep/wake:** all device work gated on reachability; unreachable = normal. The host
   cannot wake the room (can't connect to a sleeping TV). Wake re-applies the current set.
 - **Errors:** catch `ResponseError` (e.g. `-7` invalid interval); bounded calls guard
   hangs; failed uploads leave `pending` placements for the reconciler.
@@ -409,7 +409,7 @@ Rules (periods, collections, intervals, sizes) live here. Only **runtime overrid
 ---
 
 ## 10. Phased delivery
-- **Phase 0 — Feasibility & core (DONE):** API proven on the unit; `frame_client`,
+- **Phase 0 — Feasibility & core (DONE):** API integration; `frame_client`,
   `images`, `fao` (ping/info/current/list/push/show/delete); upload + slideshow verified.
 - **Phase 1 — Library core (mostly done):** SQLite schema + migrations; ingest core
   (dedupe, archive, EXIF, render); uploader/placement (two-phase + reconcile);
@@ -421,7 +421,7 @@ Rules (periods, collections, intervals, sizes) live here. Only **runtime overrid
   categorize. `fao serve`. (Renders via a plain `jinja2.Environment`; plain uvicorn.)
 - **Phase 4 — Polish:** smart collections (dates/seasons), richer weighting, in-UI TV
   control (show-now/pin).
-- **Phase 5 — Upload pipeline v2 (PLANNED 2026-10-01):** native-resolution, never-upscale
+- **Phase 5 — Upload pipeline v2:** native-resolution, never-upscale
   FILL/FIT rendering; TV-owned mattes with harvest + per-asset persistence; guarded
   auto-matte for non-16:9 photos. Evidence: `SAMSUNG_FRAME_API.md` §7. Plan and migration
   from the current state: **§12**.
@@ -446,15 +446,15 @@ Rules (periods, collections, intervals, sizes) live here. Only **runtime overrid
 
 ## 12. Upload pipeline v2 & migration plan
 
-*Status: **planned** (2026-10-01); **M0 (attended TV verification) completed 2026-10-02**.
-Evidence: `SAMSUNG_FRAME_API.md` §7 (experiments on the live unit). Nothing in this section
-is built yet.*
+This section documents the implemented native-resolution pipeline and a reusable
+upgrade procedure for installations using the legacy pipeline. Firmware-specific
+evidence and safe validation methods are summarized in `SAMSUNG_FRAME_API.md` §7.
 
 ### 12.1 Why, and what changes
 Measured on the current pipeline (v1, `cover` to 3840×2160): an 800×600 photo is upscaled
 ×4.8; a 2000×3000 portrait keeps 38 % of its pixels; a 5000×5000 square keeps 56 %. The TV
 applies the *same* centered crop itself when the matte is `none` (API notes §7.2), so the
-Pi's crop adds nothing but a lossy upscale. v2:
+host's legacy crop adds nothing but a lossy upscale. v2:
 
 1. **Never upscale.** Output ≤ 3840×2160, downscale only; the TV scales for the panel.
 2. **Near-16:9 photos → FILL:** a small centered crop to exact 16:9, full-bleed, matte `none`.
@@ -498,9 +498,9 @@ Computed from a prototype of this function:
 | 2560×1080 (21:9) | 25.0 % | FIT | 2560×1080 (unchanged) | odd |
 | 6000×2000 (3:1) | 40.7 % | FIT | 3840×1280 | odd |
 
-**`crop_tolerance = 0.16`, not 0.15:** you asked for "~15 %" so that a DSLR 3:2 counts as
-near, and a true 3:2 trims 15.6 % — a literal 0.15 would send every 3:2 photo to matte-fit
-(a one-line change if that's what you want). **Wider-than-16:9 photos follow the same rule**
+**`crop_tolerance = 0.16`, not 0.15:** a true 3:2 photo trims 15.6 %, so this default
+keeps that common camera aspect ratio in the near-16:9 group. Set a lower tolerance to
+keep more photos whole. **Wider-than-16:9 photos follow the same rule**
 — verified 2026-10-02: with `none` the TV crops them left/right, and with `flexible` /
 `shadowbox` it shows them whole (API notes §7.2, §7.3) — so there is no ultrawide special case.
 
@@ -595,37 +595,31 @@ See §7 `[image]`. New keys: `crop_tolerance`, `auto_matte`, `fit_matte_type`,
 | `tests/` *(new)* | See §12.10; add a `dev` extra with `pytest`. |
 | `README.md`, `config.toml` | Document the new keys; update the `[image]` text. |
 
-### 12.8 Migration plan — from where we are
-**Current state (2026-10-02).** The production DB and daemon are on the Pi (this Mac's
-`data/state.db` is a dev copy with no placements). `pipeline_version = 1`,
-`default_fit = "cover"`, `default_matte = "none"`; DB schema version 2. The TV holds 41
-photos in `MY-C0002`, all 3840×2160 — consistent with Pi uploads. **Three have matte edits
-made in the TV UI** that exist nowhere else: `MY_F0083` and `MY_F0071` → `modernthin_black`,
-`MY_F0079` → `shadowbox_sage` (it was `modern_seafoam` on 10-01). Between the 10-01 and
-10-02 baselines the daemon swapped 9 photos without reading mattes, so edits on any evicted
-photo are already gone — exactly the case "no harvest, no evict" prevents. The daemon is
-**stopped** for attended sessions (restart with `sudo systemctl start frame-art-organizer`).
-`get_slideshow_status` reads `off`, but the displayed photo changed on its own, so the
-getter misreports — the user saw a slideshow running (API notes §8).
+### 12.8 Migration strategy
+For an existing legacy installation, inventory the configured pipeline and run a
+read-only matte harvest before changing pixels. Do not assume a particular library
+size, set of content IDs, account, host, or current service state. Back up the library
+database and preserve the original images separately.
 
-Each step is independently shippable and leaves the system working; M1 and M2 change no
-rendering.
+The stages below describe the safety gates for an upgrade. New installations can use
+the current implementation directly; existing installations should use the attended
+runbook in §12.12 before replacing a resident set.
 
 | Step | What | Exit criteria |
 |---|---|---|
-| **M0 — Attended TV verification** *(no code)* — **DONE 2026-10-02** | Ran the matte × shape matrix with the §7.10 protocol, TV-UI-first with a polling watcher, then API-set (API notes §7.11): `flexible` and `shadowbox` offered and displayed whole on **2:3, 4:3, 1:1 and 21:9**; `flexible_black` set via the API displayed correctly on all four; wider-than-16:9 behaves like the other non-16:9 shapes. | **Cleared:** `ODD_ALLOWED = {flexible, shadowbox}` and the default `flexible_black` are verified; the ultrawide special case is gone. **Slideshow:** `get_slideshow_status` reads `off` while a slideshow visibly runs, so it is a getter misreport, not a state (§12.11); the M3 canary still watches the wall rotate. |
-| **M1 — Harvest only** — **BUILT** on branch `m1-matte-harvest` (58 tests; ships when merged and deployed to the Pi) | Migration 3, `store.harvest_mattes`, wired into `reconcile`, the top of `refresh`, and a daemon tick; `fao harvest`. Rendering untouched. | On the Pi, `fao harvest` records exactly the edits present at that time — as of 2026-10-02 three: `MY_F0083` and `MY_F0071` → `modernthin_black`, `MY_F0079` → `shadowbox_sage` (all shape `wide`); a second run reports none. TV unchanged (read-only). |
-| **M2 — v2 code, dormant** — **BUILT** on branch `m2-render-plan` (188 tests; ships when merged and deployed) | `images.plan_render`, `mattes.py`, scheduler/uploader changes, tests. Config stays `cover` / `pipeline_version = 1`. `matte_for` is live: v1 derivatives are all 16:9 (`wide`) → preference-or-`none`, i.e. today's behavior **plus** honoring harvested preferences and `portrait_matte = none`. | Tests green; `fao plan-report` on the real library shows the FILL/FIT split with no surprises; an attended `schedule-refresh` behaves exactly as today, except that any newly uploaded photo uses its harvested matte preference. |
-| **M3 — Flip to v2** — tooling + rehearsal **BUILT**; **live rehearsal on the real TV PASSED 2026-10-02** with six synthetic photos (API notes §7.12); the canary on the real library is still attended: runbook §12.12 | Set `default_fit = "auto"`, `pipeline_version = 2`. Render all derivatives (daemon or `fao ingest`) **before** the first v2 refresh — selection only sees `(fit_mode, pipeline_version)` matches, so an unrendered library would look empty and the empty-set guard would skip. Then an **attended canary**: `schedule-refresh --limit 3` (include one FIT and one FILL photo), look at the wall, then run it unlimited. The derivative-based diff replaces each v1 placement with its v2 derivative, adds first, so the set never shrinks — about `set_size` uploads, once. | Canary photos look right on the TV; a baseline-style diff shows the same photo count with v2 sizes/mattes; the harvested edits (e.g. `MY_F0079` → `shadowbox_sage`) are re-applied. |
-| **M4 — UI + cleanup** — **BUILT** (263 tests; the purge itself is a later, attended step) | Gallery badges, details view, previews that show the whole photo, README; `fao purge-derivatives` for after the soak (a week or two). | Badges match `plan-report` — **a test** (ten shapes really rendered, kind / crop % / matte / low-res compared). Looked at in a real browser: grid, list and details modals, no JS errors. v1 purged — **pending the soak on the Pi**, then `fao purge-derivatives` (dry run first). |
+| **M0 — Compatibility verification** | Use synthetic images and the API notes §7.10 protocol to verify matte types offered for each shape and visually confirm them. | The supported shape/type combinations display safely; verify slideshow transitions visually rather than trusting its getter. |
+| **M1 — Harvest only** | Record the TV's matte choices per asset and shape before any replacement. | A first read-only harvest records existing edits; a second unchanged harvest is a no-op. |
+| **M2 — Render-plan review** | Keep the legacy configuration while reviewing `fao plan-report` and running tests. | The FILL/FIT split and upload matte policy match expectations without changing the resident set. |
+| **M3 — Adopt v2** | With background refresh stopped, select `auto` / pipeline 2, render replacements, then use an attended `schedule-refresh --limit 3` canary followed by bounded batches. | Whole and cropped photos display correctly; compatible harvested mattes survive; replacements are uploaded before old copies are removed. |
+| **M4 — UI + cleanup** | Verify gallery previews/badges and retain old derivatives during a soak period. | UI and CLI reports agree; only after the soak, review a purge dry run before applying it. |
 
-**Operational prerequisites (learned 2026-10-02).**
+**Operational prerequisites.**
 - **Wedged API:** if art calls hang while the TV is awake and showing art, power-cycle the
   external media box — the TV's own power button only turns off the panel (API notes §8).
   Probe with a bounded `get_artmode` before any attended session.
-- **Pi access:** before restarting the Pi's daemon, check the TV's access mode and allowed
-  list. Under "allow, prompting first time" the Pi's client (`FrameArtOrganizer`) must be on
-  the list (pair once with `fao info` on the Pi and press Allow) or it hangs on every
+- **Client approval:** before restarting the daemon, check the TV's access mode and allowed
+  list. Under "allow, prompting first time" the configured client must be on
+  the list (pair once with `fao info` and press Allow) or it can hang on every
   connect and rotation silently stops.
 - **Stop the daemon during attended experiments** (it re-asserts the slideshow on every TV
   wake and competes for the art channel), then restart it.
@@ -636,14 +630,14 @@ If auto-matte misbehaves, set `auto_matte = false` without rolling pixels back. 
 shows the 40000 dialog: power-cycle, then `fao delete <content_id>` for the offender (the
 guards should prevent it). Don't purge v1 until the soak ends: `fao purge-derivatives` enforces
 `--min-age-days` (default 14) and refuses while the TV holds an old render. After a purge, a
-rollback re-renders from the originals (minutes on the Pi) instead of being instant.
+rollback re-renders from the originals rather than reusing the retained derivatives.
 
 ### 12.9 Risks & mitigations
 | Risk | Mitigation |
 |---|---|
 | A matte/shape mismatch crashes the TV (known) | Shape-scoped preferences; config validation against `ODD_ALLOWED`; string validation in `upload_jpeg`; M0 gate; `auto_matte` kill switch; attended canary |
 | Art API wedged while the TV looks fine (calls hang; only a media-box power-cycle fixes it); another client's `clientDisconnect` can abort a connect | Bounded calls (already `FrameTimeout`, treated like asleep); close sockets on timeout; retry `ConnectionFailure` once or twice; probe `artmode` first |
-| Pi can't connect after the TV's access mode is changed to prompting | Verify `FrameArtOrganizer` is on the allowed list before restarting the daemon (§12.8 prerequisites) |
+| Client can't connect after the TV's access mode is changed to prompting | Verify the configured client is on the allowed list before restarting the daemon (§12.8 prerequisites) |
 | Purge deletes a render that is still needed | Dry run by default; only photos with a replacement on disk, past the soak, unused by the TV, from an older pipeline than configured, inside the derivatives dir; refused mid-migration; DB first, files after; originals never touched (§12.12 step 7) |
 | User's TV edit lost to eviction | Harvest-first; *no harvest, no evict*; slow daemon harvest tick |
 | A matte edit lost when a photo is re-uploaded in the same run it was edited | Preferences are read **after** the harvest (a bug the M3 rehearsal found and fixed: the plan had copied stale ones) |
@@ -651,7 +645,7 @@ rollback re-renders from the originals (minutes on the Pi) instead of being inst
 | `available()` hangs | Bounded call; skip harvest **and removes** that run; adds may proceed |
 | Native-size photos look softer than a Lanczos 4K | Judge on the wall during the M3 canary; rollback is one config change |
 | FIT photos show smaller (matte around them) | Intended; `flexible` fills the panel height for portraits (API notes §7.3) |
-| One-time churn at M3 (~40 uploads); an unlimited swap peaks at **2× the set** (add-before-remove) | Batches via `--limit` (a batch of 10 peaks at set + 10); canary first; attended; TV awake only (§12.12) |
+| One-time replacement at M3; an unlimited swap peaks at **2× the set** (add-before-remove) | Batches via `--limit` (a batch of 10 peaks at set + 10); canary first; attended; TV awake only (§12.12) |
 | Deleting the displayed item flickers | Switch the display to a surviving item first (§12.7 `scheduler.py`) |
 | New daemon harvest tick vs the single DB writer | Same single-writer discipline as today (§6) |
 
@@ -662,38 +656,34 @@ rollback re-renders from the originals (minutes on the Pi) instead of being inst
   `portrait_matte` always `none`); config validation rejects `modern` / unknown colors for
   FIT; harvest diff against a fake listing (changed, unchanged, vanished, orphan,
   `''`/`None`); `plan()` derivative-diff after a version bump; migration 2→3 on a copy of
-  the real DB.
+  a fixture database.
 - **Attended integration (the live TV):** the §7.10 protocol with labeled synthetic images —
   baseline snapshot, recorded ids, canary swaps, exact-id cleanup, baseline diff.
-- **Dry run:** `fao plan-report` over the real library before M3.
+- **Dry run:** `fao plan-report` over the installation's library before M3.
 
-### 12.11 Decisions (confirmed 2026-10-02)
+### 12.11 Defaults and compatibility decisions
 1. **`crop_tolerance = 0.16`** — decided (a true 3:2 trims 15.6 % and gets cropped).
-2. **Default matte `flexible_black`** — decided; black is fine. `flexible` sizes the photo to
+2. **Default matte `flexible_black`** — configurable. `flexible` sizes the photo to
    the panel's long edge (shows larger) where `shadowbox` insets it; `*_black` reads dark
    slate on the panel, and any photo can be changed on the TV.
 3. **Eager migration** — decided: at the first v2 refresh the derivative-based diff swaps
    every stale derivative, canaried with `schedule-refresh --limit N` (§12.8 M3).
 4. **Daemon harvest tick: 15 min** — decided.
 5. **Ultrawide** — resolved by M0: same rule as other non-16:9 shapes; no special case.
-6. **Slideshow reads `off`** — resolved enough: the user saw a slideshow running while the
-   getter read `off`, so it misreports; never gate logic on it. The M3 canary still watches
-   the wall actually rotate.
-
-**Still to do before M1 ships (operational):** restart the Pi's daemon with the TV's access
-mode and allowed list checked (§12.8 prerequisites); decide whether the TV's motion sensor
-stays off.
+6. **Slideshow reads `off`** — the getter can misreport while a slideshow runs; never gate
+   logic on it. The canary still needs visual confirmation that the displayed art rotates.
 
 
-### 12.12 Runbook — the live migration (attended)
-Everything the code can do ahead of time is built and rehearsed (`tests/test_migration_rehearsal.py`
-runs this exact sequence against a model of the TV, including the crash rule). What remains
-needs **you at the TV**. Do it only after M1–M4 are deployed to the Pi and `fao harvest` has run
-clean (M1's exit criteria).
+### 12.12 Runbook — upgrading an existing library (attended)
+`tests/test_migration_rehearsal.py` exercises this sequence against a model of the TV,
+including the crash rule. Device-specific validation still needs **a person at the TV**.
+Install the current application on the chosen host and confirm that `fao harvest` succeeds
+before replacing the legacy resident set.
 
 **Before you start**
-- The Pi's daemon is **stopped** — `sudo systemctl stop frame-art-organizer` — for the whole
-  procedure. If it is running when the config flips, its first refresh is an *unlimited* swap with
+- Keep the daemon **stopped** throughout the procedure. For a systemd deployment, use
+  `sudo systemctl stop frame-art-organizer`. If it is running when the config flips,
+  its first refresh is an *unlimited* swap with
   no canary.
 - The TV is awake in Art Mode and the art API answers (`fao info`). If it hangs, power-cycle the
   media box first (API notes §8).
@@ -709,8 +699,8 @@ Adjust `crop_tolerance` (try `fao plan-report --crop-tolerance 0.15`) or stop he
 bad value fails right here with the key named, before the TV is touched.
 
 **3. Canary** — `fao schedule-refresh --limit 3`. The first run renders the whole library
-(`rendered N pending derivative(s)`; minutes on a Pi) and then uploads 3 photos, evicting the 3
-old versions of those same photos. It lists each upload:
+(`rendered N pending derivative(s)`; runtime depends on the host) and then uploads up
+to 3 photos, evicting the old versions of those same photos. It lists each upload:
 `+ name  WxH  matte=…  -> MY_Fxxxx`, and `--limit reached: K more swap(s) pending`.
 Look at the wall with `fao show MY_Fxxxx`, picking at least **one whole (FIT) photo and one
 full-bleed (FILL) photo** (`fao plan-report` says which is which):
@@ -742,10 +732,9 @@ This is the one step that ends the instant rollback — do it only when you are 
   crash it. You can re-pick on the TV; the harvest remembers.
 - The v1 derivative files stay on disk until you run `fao purge-derivatives --apply` (step 7) — that
   is what makes rollback instant. After a purge a rollback re-renders from the originals.
-- **Verified on the real TV (2026-10-02):** before deleting the photo that is on the wall, the
-  refresh shows a surviving one with `select(show=False)` (only in Art Mode). Observed: a smooth,
-  barely noticeable replace — no flicker, blank or dialog. The TV's slideshow keeps rotating on its
-  own, so the wall may be on a different photo than the one the CLI printed a minute earlier.
+- Before deleting the photo that is on the wall, the refresh shows a surviving one with
+  `select(show=False)` (only in Art Mode) to avoid a visible interruption. The TV's slideshow
+  keeps rotating on its own, so the wall may show a different photo from the last CLI report.
 - `fao plan-report` (and the first `schedule-show`) run **before** the first refresh, so they don't
   know about TV edits not harvested yet — a photo you re-matted on the TV can show its default
   matte there. The refresh harvests first and uploads with the edit; run `fao harvest --dry-run`
@@ -824,3 +813,11 @@ EXIF orientation, no upscaling, original preservation, Auto reset/deduplication,
 matte-to-crop-to-matte reuse, shape-scoped matte preservation, selection/batch/purge
 integration, failed renders, failed harvest/upload retention, preview cache separation,
 and truthful pending TV details. No live TV experiment or deployment is part of this feature.
+
+**SQLite compatibility:** older SQLite runtimes, including 3.40.1,
+cannot resolve an outer policy alias inside a correlated subquery's `ORDER BY`.
+This raised `no such column: ap.render_mode` in the gallery even though migration 6 had
+succeeded and the column existed. Select the matching derivative using correlated
+`WHERE` predicates, then `COALESCE` to a separate newest-derivative lookup. Regression
+coverage: `tests/test_gallery_sqlite_compat.py`, runnable without pytest and using only
+in-memory databases so the same tests can be run with an installation's SQLite runtime.

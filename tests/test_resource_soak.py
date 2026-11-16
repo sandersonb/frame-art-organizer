@@ -1,5 +1,7 @@
 import importlib.util
 import json
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -32,11 +34,11 @@ def test_os_tree_sockets_and_reparented_worker(tmp_path):
     process(tmp_path, 103, 1, 40)  # Reparented worker, found independently.
     process(tmp_path, 104, 1, 99)  # Reused PID does not match tracked birth time.
     (root/'net').mkdir()
-    (root/'net'/'tcp').write_text('header\n0: 0100007F:1234 6264A8C0:1F42 08 0 0 0 0 0 77\n'
-                                '1: 0100007F:1235 6264A8C0:1F42 06 0 0 0 0 0 0\n')
+    (root/'net'/'tcp').write_text('header\n0: 0100007F:1234 0A0200C0:1F42 08 0 0 0 0 0 77\n'
+                                '1: 0100007F:1235 0A0200C0:1F42 06 0 0 0 0 0 0\n')
     (root/'net'/'tcp6').write_text('header\n')
     (tmp_path/'meminfo').write_text('MemAvailable: 2048 kB\n')
-    result = resource_probe.snapshot(100, host='192.168.100.98', proc=tmp_path,
+    result = resource_probe.snapshot(100, host='192.0.2.10', proc=tmp_path,
                                      tracked_workers={103:40, 104:41})
     assert [r['pid'] for r in result['descendants']] == [101,102]
     assert [r['pid'] for r in result['tracked_worker_survivors']] == [103]
@@ -44,7 +46,7 @@ def test_os_tree_sockets_and_reparented_worker(tmp_path):
     assert result['family_tcp_states'] == {'08':1}
     assert result['tv_tcp_states_systemwide'] == {'08':1,'06':1}
     assert result['system']['mem_available_kib'] == 2048
-    assert '192.168' not in json.dumps(result)
+    assert '192.0.2.10' not in json.dumps(result)
 
 
 def test_missing_proc_data_is_explicit(tmp_path):
@@ -55,6 +57,14 @@ def test_missing_proc_data_is_explicit(tmp_path):
 
 def test_ipv6_word_order():
     assert str(resource_probe.endpoint_address('00000000000000000000000001000000:1F42')) == '::1'
+
+
+def test_cli_help_describes_a_portable_config_default():
+    script = Path(__file__).parents[1] / 'scripts/frame_resource_soak.py'
+    result = subprocess.run([sys.executable, str(script), '--help'], capture_output=True,
+                            text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert 'config.toml in the working directory' in ' '.join(result.stdout.split())
 
 
 def test_cycle_only_reads_and_closes(monkeypatch):

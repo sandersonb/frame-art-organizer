@@ -138,22 +138,22 @@ def test_shape_class_comes_from_the_derivative_size(conn):
     assert _policy(conn, unk)["matte_shape"] is None               # never matched to any shape later
 
 
-def test_the_three_edits_found_on_the_tv_on_2026_10_02(conn):
-    """Mirrors the real TV: two photos none -> modernthin_black, one modern_seafoam -> shadowbox_sage."""
+def test_multiple_synthetic_matte_edits_are_harvested_idempotently(conn):
+    """Two default mattes and one existing style change; a fourth item is untouched."""
     dev = add_device(conn)
-    resident(conn, dev, 83, content_id="MY_F0083", matte="none")
-    resident(conn, dev, 71, content_id="MY_F0071", matte="none")
-    resident(conn, dev, 79, content_id="MY_F0079", matte="modern_seafoam")
-    resident(conn, dev, 82, content_id="MY_F0082", matte="none")             # untouched
-    listing = [item("MY_F0083", "modernthin_black"), item("MY_F0071", "modernthin_black"),
-               item("MY_F0079", "shadowbox_sage"), item("MY_F0082", "none")]
+    resident(conn, dev, 1, matte="none")
+    resident(conn, dev, 2, matte="none")
+    resident(conn, dev, 3, matte="modern_seafoam")
+    resident(conn, dev, 4, matte="none")             # untouched
+    listing = [item("MY_F0001", "modernthin_black"), item("MY_F0002", "modernthin_black"),
+               item("MY_F0003", "shadowbox_sage"), item("MY_F0004", "none")]
 
     changes = store.harvest_mattes(conn, dev, listing)
 
     assert sorted((c["content_id"], c["old"], c["new"], c["shape"]) for c in changes) == [
-        ("MY_F0071", "none", "modernthin_black", "wide"),
-        ("MY_F0079", "modern_seafoam", "shadowbox_sage", "wide"),
-        ("MY_F0083", "none", "modernthin_black", "wide"),
+        ("MY_F0001", "none", "modernthin_black", "wide"),
+        ("MY_F0002", "none", "modernthin_black", "wide"),
+        ("MY_F0003", "modern_seafoam", "shadowbox_sage", "wide"),
     ]
     assert store.harvest_mattes(conn, dev, listing) == []                    # and then it's quiet
 

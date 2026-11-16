@@ -24,7 +24,7 @@ changes. The original front-end-only constraint above applies to the organizer, 
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │ HEADER   Frame Art Organizer · 12 photos        [Upload Photos] [▦|≣] [Sort ▾] │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│ FILTER   (All Photos 12) (⌗ No Collection 3) (● family 4) (● drew 1) …  (+ New)│
+│ FILTER   (All Photos 12) (⌗ No Collection 3) (● family 4) (● art 1) …   (+ New)│
 ├─────────────────────────────────────────────────────────────────────────────┤
 │ GALLERY  ┌ card ┐ ┌ card ┐ ┌ card ┐ ┌ card ┐ ┌ card ┐                          │
 │          │ ☐  ⋯ │ …            (responsive grid, ~5 cols desktop)              │

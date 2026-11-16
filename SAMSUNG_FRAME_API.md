@@ -1,15 +1,14 @@
-# Samsung The Frame — Local Art API (Field Notes)
+# Samsung The Frame — Local Art API Reference
 
-Everything below was **empirically verified against a real unit**, not taken from
-docs (there are none). Treat it as reverse-engineered and firmware-fragile.
+This reference summarizes observed protocol behavior and reproducible validation
+methods, not a particular installation. Treat the API as reverse-engineered and
+firmware-fragile; confirm behavior on the target firmware before expanding support.
 
 | | |
 |---|---|
-| Unit | **QN65LS03FAFXZA** (65" The Frame, 2025), internal model `25_PTM_FTV` |
-| Firmware art-API version | **`5.0.1.0`** (`art().get_api_version()`) |
+| Scope of observations | Art API **`5.0.1.0`** (`art().get_api_version()`); not a guarantee for every TV |
 | Client library | `samsungtvws` **3.0.6** (xchwarze, PyPI), sync API |
 | Transport | WebSocket over TLS on **port 8002** + REST on 8001/8002 |
-| Verified | 2026-09-23 (core API) · 2026-10-01 and 2026-10-02 (aspect-ratio / matte experiments, §7) |
 
 > ⚠️ **Unofficial.** Samsung does not document or support this. It has broken
 > across firmware generations before (2024 handshake change) and can again. The
@@ -26,32 +25,25 @@ docs (there are none). Treat it as reverse-engineered and firmware-fragile.
   screen**; accept it once with the remote. The returned token must be persisted
   (`token_file`) or every connect re-prompts. Toggling some Art settings on the TV
   can re-trigger the trust prompt.
-- **A second client did not need pairing (observed 2026-10-01).** A different client
-  name (`FrameArtExperiment`) with a `token_file` that did not exist connected and ran
-  `available`, `get_current`, `upload`, `select_image` and `delete` with **no Allow
-  prompt**, and no token was returned or written. So pairing is not strictly required on
-  this unit. Why is not investigated (likely a TV-side connection-approval setting); don't
-  rely on it for other TVs or firmware.
-- **The TV has an access-mode setting** ("always allow" vs "allow, prompting first time")
-  and an allowed-clients list. On 2026-10-01 the TV was on *always allow*: clients were let
-  in silently and **never appeared in the list** (only the Sep 23 `FrameArtProbe` pairing
-  did). On 2026-10-02 the user switched it to prompting and cleared the list; a client then
-  triggered an on-screen Allow popup (the user pressed Allow). Whichever mode is active, a
-  client that is not yet approved can sit silently on the websocket — see the wedged-API and
-  `clientDisconnect` gotchas in §8. If the Pi's client (`FrameArtOrganizer`) is not on the
-  list, switching to the prompting mode would make the Pi hang on every connect until
-  someone presses Allow.
+- **Pairing depends on the TV's access mode.** An "always allow" mode can admit a new
+  client without an approval prompt or returned token. Do not rely on that behavior
+  for another TV or firmware, and do not treat it as an authentication guarantee.
+- **Check the allowed-clients list** when using "allow, prompting first time" mode.
+  An unapproved client can wait silently on the WebSocket until someone presses Allow.
+  Verify the configured client is approved before enabling background operation;
+  also see the wedged-API and `clientDisconnect` gotchas in §8.
 - **REST device info** (no token): `GET https://<host>:8002/api/v2/` returns model,
   `PowerState`, `TokenAuthSupport`, `FrameTVSupport`, `resolution`, `wifiMac`,
   `duid` (stable TV UUID across IP changes). Handy as a cheap liveness/identity check.
 
 ```jsonc
-// GET /api/v2/  → device{}
-"modelName": "QN65LS03FAFXZA", "model": "25_PTM_FTV",
+// GET /api/v2/ → selected device fields; placeholders are not device identifiers
+"modelName": "<model-name>", "model": "<internal-model>",
 "PowerState": "on", "TokenAuthSupport": "true", "FrameTVSupport": "true",
-"resolution": "3840x2160", "wifiMac": "AA:BB:CC:DD:EE:FF",          // redacted
-"duid": "uuid:00000000-0000-0000-0000-000000000000"                // redacted
+"resolution": "3840x2160"
 ```
+
+Device identity fields are useful locally but should be removed from shared captures.
 
 ---
 
@@ -138,7 +130,7 @@ Method names/signatures are from `samsungtvws.art.SamsungTVArt` (3.0.6).
   file_type='png', date=None) -> content_id`
   - **Confirmed working:** JPEG bytes, `file_type='JPEG'`, `matte='none'`, `3840x2160`.
     Returns a TV-assigned id like `MY_F0001`; lands in `MY-C0002`.
-  - **Also confirmed (2026-10-01): native-size, non-16:9 JPEGs** — 1500×2250, 2000×2000,
+  - **Also confirmed: native-size, non-16:9 JPEGs** — 1500×2250, 2000×2000,
     1600×1200 and 1280×720 are accepted as-is (no resize/reject). What the TV then
     *shows* depends on the matte — see §7.
   - **`matte` / `portrait_matte`** are stored exactly as sent (read back via
@@ -153,7 +145,7 @@ Method names/signatures are from `samsungtvws.art.SamsungTVArt` (3.0.6).
 - **`change_matte` does not work** on this firmware (`-7`, §7.5).
 - Untested but present (for future use): `set_favourite`,
   `set_photo_filter`, `set_motion_timer`, `set_motion_sensitivity`, `set_brightness`,
-  `set_brightness_sensor_setting`, `set_color_temperature`. (These imply the Pi could
+  `set_brightness_sensor_setting`, `set_color_temperature`. (These imply the application could
   later manage the Frame's Sleep-After timer, motion sensitivity, and brightness.)
 
 ---
@@ -169,13 +161,13 @@ so the overlay shows the **date twice** (confirmed by photographing the overlay)
 date. **Always pass `date` = EXIF capture date** so the overlay reads as when the
 photo was taken. Title/artist info cards are an Art-Store-only feature.
 
-**Researched 2026-09-23 (conclusive-ish):** setting a real title is **not feasible**
+**Known limitation:** setting a real title is **not feasible**
 with known tooling. No title/rename method exists in `samsungtvws` or NickWaterton's
 fork (verified from source); the SmartThings/Art Store add-photo flow has no naming
 field; the filename is never transmitted. The Frame parses **only** EXIF *orientation*
 (for auto-rotate) and shows the *date* — no evidence it renders an embedded
 EXIF `ImageDescription`, EXIF `XPTitle`, IPTC Object Name/Caption, or XMP `dc:title`.
-**Tested 2026-09-23 — it failed:** a JPEG with the title embedded in EXIF
+**Embedding metadata did not change this:** a JPEG with the title embedded in EXIF
 `ImageDescription` + EXIF `XPTitle` + XMP `dc:title` still showed the **date twice**,
 no title. Titles are **conclusively unsupported** on personal photos. The same test
 also proved the overlay **date comes from the `upload(date=…)` param, not embedded
@@ -189,7 +181,7 @@ alternative — not recommended.)
 ## 6. Slideshow control (the "let the TV cycle it" mechanism)
 
 The TV runs the slideshow itself; you just curate the set and set the config. This is
-the backbone of the "Pi curates, TV cycles" architecture.
+the backbone of the "host curates, TV cycles" architecture.
 
 - **Read:** `get_slideshow_status() -> {value, category_id, type, current_content_id,
   content_list}`. `content_list` is a **JSON string** and can be **empty `""`** —
@@ -215,14 +207,14 @@ enum above is drivable.
 
 ---
 
-## 7. Aspect ratio, cropping & mattes (experiments, 2026-10-01 and 2026-10-02)
+## 7. Aspect ratio, cropping & mattes
 
 **Method.** Synthetic images with four distinctly colored edges (red top, blue bottom,
 green left, yellow right) and 10/20/30 % inset outlines, so any crop or matte is
 obvious: portrait 1500×2250 (2:3), square 2000×2000, 4:3 1600×1200, 16:9 1280×720.
 Each was uploaded to `MY-C0002`, displayed one at a time, and **photographed on the
 wall**. Mattes were set either in the TV's own Art-Mode matte UI or at upload. A
-baseline of the TV's 41 existing photos was taken first and verified identical afterwards
+baseline of existing content must be taken first and verified unchanged afterwards
 (protocol in §7.10).
 
 ### 7.1 Native-size uploads are accepted
@@ -242,25 +234,23 @@ baseline of the TV's 41 existing photos was taken first and verified identical a
 | 2:3 portrait  | Full width kept; only rows ≈ **31–69 %** visible (~62 % of the photo cut off). No red top / blue bottom edge; the 30 % outline's label clipped at the top |
 | 1:1 square    | Full width; rows ≈ **22–78 %** (top/bottom edges gone; "20 %" label clipped, 30 % outline fully visible)                                                  |
 | 4:3           | Full width; rows ≈ **12.5–87.5 %** (10 % outline gone, 20 % outline visible)                                                                              |
-| 21:9 2560×1080 (2026-10-02) | **Full height** kept; **left/right cropped** — no green or yellow edge, no vertical outlines; red top and blue bottom visible |
+| 21:9 2560×1080 | **Full height** kept; **left/right cropped** — no green or yellow edge, no vertical outlines; red top and blue bottom visible |
 | 16:9 1280×720 | **Whole image**; the TV upscales ×3 to fill the panel; fine text stays smooth                                                                             |
 
 This is exactly a centered "cover" crop (`ImageOps.fit(centering=(0.5, 0.5))`) — what
 this project's `cover` mode did — but done by the TV. **"Let the Frame handle it" with
 no matte is a centered crop, not letterboxing.** The same holds for shapes wider than
-16:9 (verified 2026-10-02 with a 21:9 image).
+16:9 (verified with a synthetic 21:9 image).
 
 ### 7.3 With a matte, non-16:9 photos are shown whole (fit)
-- The TV UI offers **`flexible` and `shadowbox`** for every non-16:9 shape tried — 2:3,
-  4:3, 1:1 and 21:9 (the 2026-10-02 watcher log, §7.11, shows `flexible_black` as option 1
-  and `shadowbox_black` as option 2 every time) — versus ~7 types for 16:9. The user
-  reported exactly two options for 2:3 and 4:3; the count was not recorded for 1:1 and 21:9.
+- The observed TV UI offers **`flexible` and `shadowbox`** for the non-16:9 shapes
+  2:3, 4:3, 1:1 and 21:9 (§7.11), with a broader set for 16:9.
 - **Every** non-16:9 shape × {`flexible`, `shadowbox`} combination tried displayed the
   **whole image** (all four colored edges and every outline visible) inside the matte,
   with no crash. `flexible` sizes the photo to the panel's long edge (portrait: nearly
   full height; 21:9: nearly full width); `shadowbox` insets it with a margin on all sides
   and a drop shadow, so it shows smaller.
-- **4:3 + `shadowbox_byzantine`** (2026-10-01): centered, inset with a margin all round;
+- **4:3 + `shadowbox_byzantine`**: centered, inset with a margin all round;
   **2:3 + `flexible_black`**: scaled to nearly the full panel height with a thin light edge.
 - The result was **identical whether the matte was set in the TV UI or via
   `upload(matte=…)`** for every combination tested through both paths (§7.11).
@@ -269,21 +259,18 @@ no matte is a centered crop, not letterboxing.** The same holds for shapes wider
 - `available()` and `get_current()` report `matte_id` / `portrait_matte_id` and they
   **reflect edits made in the TV UI**: a user-set `modern_seafoam` on an existing 16:9
   photo, `shadowbox_byzantine` (4:3) and `flexible_black` (portrait) all read back
-  correctly. (Pre-existing photos uploaded by this project read `none` / `none`.)
+  correctly. Uploading both matte parameters as `none` reads back as `none` / `none`.
 - Editing the matte of a **portrait, 4:3, square or 21:9** photo in the TV UI changed
   `matte_id` only; **`portrait_matte_id` stayed `none`** in every logged state.
 - An API upload of a portrait photo with `matte='flexible_black', portrait_matte='none'`
-  **displayed the matte**, so `matte_id` is what applies to portrait photos on this
-  landscape-mounted panel and `portrait_matte_id` can stay `none`. Whether
+  **displayed the matte**, supporting use of `matte_id` for portrait photos on
+  landscape-mounted displays while `portrait_matte_id` stays `none`. Whether
   `portrait_matte_id` matters if the TV is physically rotated: untested.
 - `upload()` round-tripped these `matte/portrait_matte` pairs exactly: `none/none`,
   `modern_polar/none`, `none/modern_polar`, `shadowbox_byzantine/none`,
   `flexible_black/none`.
-- **Real-world edits already on the TV (2026-10-02).** Between the 2026-10-01 baseline and
-  the next day the user changed three existing 16:9 photos in the TV UI: `MY_F0083` and
-  `MY_F0071` `none` → `modernthin_black`; `MY_F0079` `modern_seafoam` → `shadowbox_sage`.
-  All read back via `available()`. So 16:9 photos accept at least `modern`, `modernthin`
-  and `shadowbox`.
+- The 16:9 shape has accepted `modern`, `modernthin`, and `shadowbox` TV-UI choices
+  that were subsequently read back through `available()`; see the shape matrix in §7.8.
 
 ### 7.5 `change_matte` does not work on this firmware
 `art.change_matte(content_id, matte_id, portrait_matte=…)` → `ResponseError`
@@ -297,7 +284,7 @@ Uploading a **4:3 (1600×1200) image with `modern_polar`** succeeded and listed 
 but **`select_image` of it** made the TV show *"An unexpected problem has occurred.
 Please turn off and on and then try again (40000)"* and **hard-restart**. The
 `select_image` call never returned. The TV came back on the previously displayed
-artwork; nothing was lost (all 41 photos, mattes and dimensions identical afterwards).
+artwork; a post-test baseline comparison found existing content unchanged.
 
 - **Hypothesis (not proven):** the art app crashes when asked to render a matte type it
   does not offer for that aspect ratio. Supporting: the TV UI offers only two types for
@@ -305,7 +292,7 @@ artwork; nothing was lost (all 41 photos, mattes and dimensions identical afterw
   4:3 and `flexible_black` on portrait — displayed fine when set **via the API at
   upload**. Only one failing combination was observed (`modern` + 4:3); `modern_polar`
   on a portrait and on a square were uploaded but never displayed (then deleted).
-  **Strengthened 2026-10-02:** the TV UI offers only `flexible`/`shadowbox` on every
+  **Additional validation:** the TV UI offers only `flexible`/`shadowbox` on every
   non-16:9 shape tried, and `flexible_black` set via the API displayed correctly on all
   four of them (§7.8, §7.11) — still no counter-example.
 - **Hazard:** the bad combination is accepted at upload and sits in `MY-C0002` until
@@ -329,9 +316,8 @@ shows a color selector with all 16:
 | seafoam | 90, 104, 101  | skyblue        | 105, 192, 211 |
 | sage    | 170, 176, 141 | turquoise      | 46, 150, 141  |
 
-`black` is charcoal (34,34,33), not pure black; in phone photos of the wall — across four
-photo sets on 2026-10-01/02 — a `*_black` matte consistently read as a dark slate /
-blue-grey (camera exposure may exaggerate it). Pick the default color by eye on the panel.
+`black` is charcoal (34,34,33), not pure black. TV display settings and camera exposure
+can affect its apparent color; judge the default on the target display rather than a screenshot.
 
 ### 7.8 Known matte × shape results
 OK = displayed correctly · CRASH = hard-restarted the TV · — = untested. "TV UI" = set in
@@ -354,7 +340,7 @@ the TV's own matte menu; "API" = set via `upload(matte=…)`.
 
 ### 7.9 Implications for this project
 - Pre-rendering a 3840×2160 `cover` crop (what the app did) and the TV's own `none`
-  handling produce the **same crop**; the Pi's contribution was only a lossy upscale.
+  handling produce the **same crop**; pre-rendering an upscale adds no source detail.
 - A non-16:9 photo is shown **whole** only with a `flexible` / `shadowbox` matte, so an
   app that wants whole portraits must **set that matte at upload** (the only API
   path) and **must never send a type outside what the shape allows** (§7.6).
@@ -382,9 +368,9 @@ the TV's own matte menu; "API" = set via `upload(matte=…)`.
 8. Give every probe script a **hard alarm** (`signal.alarm`) and write progress to a file —
    never pipe it through a buffering filter such as `grep`/`tail`, which hides where it stalled.
 
-### 7.11 M0 session log (2026-10-02)
-Matte watcher output (TV-reported `matte_id` as the user clicked through the TV UI), and
-whether the **whole** image showed (user observation + photos):
+### 7.11 Compatibility validation matrix
+The observed TV-UI matte choices and whole-image checks for synthetic fixtures are
+summarized below. Repeat these checks when qualifying another firmware version:
 
 | Shape / image | Option 1 | Option 2 | Whole image shown? |
 |---|---|---|---|
@@ -393,31 +379,32 @@ whether the **whole** image showed (user observation + photos):
 | 2:3 · 1500×2250 | `flexible_black` | `shadowbox_black` | Yes, both (`shadowbox` inset smaller) |
 | 21:9 · 2560×1080 | `flexible_black` | `shadowbox_black` | Yes, both (`none` cropped left/right) |
 
-**API-path check** (what the Pi actually does): `upload(matte='flexible_black',
+**API-path check** (what the application does): `upload(matte='flexible_black',
 portrait_matte='none')` of a 4:3, a 1:1 and a 21:9 image, each displayed once with
 `select_image` — all displayed whole like the TV-UI version, no dialog, no hang; `select_image`
-returned normally and `get_current()` reported `flexible_black` each time (observed live by
-the user; not photographed). With 2026-10-01's API-set portrait `flexible_black` and 4:3
-`shadowbox_byzantine`, `flexible_black` is now verified via the API on **all four non-16:9
-shapes**. The TV was restored and verified identical to its pre-test baseline afterwards.
+returned normally and `get_current()` reported `flexible_black` each time. Together with
+portrait checks and a 4:3 `shadowbox_byzantine` check, this supports the guarded
+`flexible` / `shadowbox` policy for these shapes. Restore and verify the pre-test baseline
+after running any such validation.
 
-### 7.12 Live migration rehearsal (2026-10-02)
-The real v1 → v2 code (`uploader.sync`, `harvest`, `scheduler.refresh`, with a distinct client
-name, the slideshow setting untouched) run against the live TV with **six synthetic photos**
-(16:9, 3:2, 4:3, portrait, square, 21:9), following the §7.10 protocol. All observations are the
-user's, at the TV, plus the TV's own listing:
+### 7.12 Migration validation checklist
+Exercise the v1 → v2 code (`uploader.sync`, `harvest`, `scheduler.refresh`) using a
+distinct client name and synthetic photos covering 16:9, 3:2, 4:3, portrait, square,
+and ultrawide shapes. Follow §7.10 and leave unrelated slideshow settings untouched.
 
-| Step | Result |
+| Step | Expected validation |
 |---|---|
-| v1 seed | Six 3840×2160 uploads, matte `none`; the portrait showed as a cropped 16:9 band. |
-| TV edits | The user set the 3:2 to `modern_black` and the portrait (cropped) to `modernwide_black`; a dry-run harvest read both back. |
-| Canary of 2 | The photo on the wall was among the two replaced: the wall switched away first — smooth, no flicker or dialog. The new 3:2 (1500×844, FILL) kept `modern_black`; the new portrait (800×1200, FIT) got `flexible_black` — the `modernwide_black` choice was **not** carried to the whole portrait (the combination that crashed the TV on 2026-10-01). |
-| The other four | 16:9 1920×1080 `none`; 4:3 1200×900, 1:1 1000×1000 and 21:9 2400×1000, each `flexible_black`: **whole, no crop, black matte**, each reported back at its native size. |
-| Settled | A second refresh added/removed nothing; a harvest found nothing. |
-| Rollback | Config back to cover/v1: all six swapped back to the retained 3840×2160 derivatives, the TV-chosen mattes re-applied (valid again on the 16:9 version), whole photos back to `none` (cropped). |
-| Cleanup | Exactly the 18 recorded test IDs deleted; the wall restored; a diff against the pre-test baseline showed the 41 real photos untouched (nothing missing, no field changes, no strays). |
+| v1 seed | Legacy uploads are 3840×2160 with matte `none`; non-wide originals appear cropped. |
+| TV edits | Change compatible mattes on synthetic 16:9 derivatives and confirm a dry-run harvest reads them back. |
+| Canary | Replace a small subset including the displayed item; switch the display away before deletion. Retain a harvested matte only when the replacement has the same shape class. |
+| Shape changes | A wide-only `modernwide` choice must not carry over to a whole portrait; use a compatible FIT matte instead. |
+| Remaining shapes | Native-size whole-photo derivatives display completely with a compatible matte and report their uploaded sizes. |
+| Settled | An unchanged repeat refresh and harvest are no-ops. |
+| Rollback | Retained legacy derivatives can be selected again; only shape-compatible TV matte preferences are reapplied. |
+| Cleanup | Delete only test IDs recorded during this validation, restore the original display, and verify existing content against the baseline. |
 
-Timing: a 2-photo batch ≈ 14 s, 4 ≈ 22 s, a full 6-photo swap ≈ 34 s (these are small test JPEGs).
+Batch duration depends on image sizes, the network, and the target devices; use small
+attended canaries and bounded operations rather than assuming a particular throughput.
 
 ---
 
@@ -442,44 +429,33 @@ Timing: a 2-photo batch ≈ 14 s, 4 ≈ 22 s, a full 6-photo swap ≈ 34 s (thes
   (error 40000, hard restart) even though the upload succeeded — §7.6. Validate before
   uploading; never display-test an unverified combination unattended.
 - **`change_matte` → `-7`** on this firmware; mattes are upload-time only (§7.5).
-- **`get_slideshow_status` read `value: 'off'`** (all other fields empty, plus a
-  `sub_category_id` key not seen before) on 2026-10-01 with 41 photos resident — both
-  before and after the experiment, which never touched the slideshow. Unexplained: the
-  Pi was expected to be running one. Check the daemon/TV rather than assuming a
-  slideshow is active.
-- **`content_id`s are never reused.** After deleting `MY_F0107`–`MY_F0114` the next
-  upload was `MY_F0115` (reinforces §9 point 4).
-- **The art API can wedge while the TV looks perfectly fine (2026-10-02).** With the TV
-  awake — port 8002 open, REST `PowerState=on`, and (user-reported) the **Art Mode slideshow
-  visibly running** — every art call hung: the TLS websocket upgrade and `ms.channel.connect`
-  arrived within ~0.2 s, but the art app never sent `ms.channel.ready`, so each call blocked
-  until its timeout (the library's `open()` waits for that event, `art.py:83`). **Powering
-  the TV off did not help — it only turns off the panel.** The web server/API runs on the
-  external media box (the Frame's One Connect box), and **power-cycling that box recovered
-  it** (user-reported, ~99 % sure). The trigger is unknown. Unproven suspects: the TV's
-  hard restart the day before and/or accumulated half-open sessions from killed or
-  timed-out clients. **A client-side leak was found and fixed (2026-10-02):** the project's
-  `FrameClient.close()` closed only the remote socket, but `tv.art()` builds a *separate*
-  `SamsungTVArt` with its own websocket that was never closed — and `_bounded()` abandoned
-  a hung worker thread blocked in `recv()`, keeping it alive forever. It now closes both. **TCP/REST reachability is not proof the art API will answer.** Keep
-  every art call bounded, treat a timeout as "not available now" (the project's
-  `FrameTimeout`), and close clients promptly. *(An earlier version of this note guessed
-  the TV was on another input / not in Art Mode; that was wrong.)*
+- **The slideshow getter can report `value: 'off'` while art is visibly rotating.**
+  Other fields can be empty, and firmware may add fields such as `sub_category_id`.
+  Check the daemon and the display rather than gating rotation logic on this getter.
+- **Do not assume `content_id` reuse.** Upload IDs can continue increasing after
+  deletions. Treat them as mutable placement attributes, not photo identities (§9).
+- **The art API can wedge while the TV looks healthy.** Port 8002 can be open, REST
+  can report `PowerState=on`, and a slideshow can visibly run while Art requests hang.
+  A TLS/WebSocket upgrade and `ms.channel.connect` do not guarantee that the Art app
+  will send `ms.channel.ready`. Bound the wait and treat a timeout as unavailable.
+  On hardware with a separate media box, turning off only the panel may not restart
+  the API; follow the manufacturer's instructions to restart the component hosting it.
+  The cause of such wedges is not established by those symptoms alone.
+- **Close both client sockets and bound cleanup.** `tv.art()` creates a separate
+  `SamsungTVArt` WebSocket in addition to the remote-control socket. Closing only the
+  remote socket leaks the Art connection; abandoning a blocked worker can keep it alive.
+  The client must close both and reap failed workers. TCP/REST reachability is not proof
+  that the Art API will answer, nor proof that a failure originated in the client.
 - **A transient `ConnectionFailure` can come from another client's disconnect.** The
-  library fails on any first frame other than `ms.channel.connect`/`ready`. On 2026-10-02
-  the first frame was `ms.channel.clientDisconnect` (names are base64) for a *different*
-  client (`FrameArtOrganizer`, the Pi's daemon, which connects and disconnects each tick)
-  leaving at that moment. Retry once or twice rather than failing.
-- **`get_slideshow_status` still read `off` (empty fields) on 2026-10-02**, yet the displayed
-  item changed on its own between 10-01 and 10-02 (`MY_F0079` → `MY_F0082`) and the Pi
-  swapped 9 photos. The user also saw the Art Mode slideshow running on screen while it read
-  `off`, so the getter misreports on this firmware — don't gate logic on it.
-- **The Pi's daemon churns the set between sessions:** between the 2026-10-01 and 10-02
-  baselines 9 photos were added (`MY_F0117`–`F0125`) and 9 removed — evictions that never
-  read the TV's matte, so any matte edit on an evicted photo would have been lost.
-- **Physical (user-reported):** the TV was put inside a picture frame that can block the
-  motion sensor; the sensor was switched off on 2026-10-02. A blocked sensor can make the
-  TV sleep, closing port 8002 (it was unreachable at 17:06 that day and woke ~17:10).
+  library can reject an unexpected first frame such as `ms.channel.clientDisconnect`
+  for another client. Client names in these events are base64-encoded. A small bounded
+  retry can handle this condition; do not retry an uncertain upload automatically.
+- **Harvest before rotating content out.** Deleting a resident item destroys TV-side
+  matte edits unless they were read back first. Background rotation must respect the
+  same harvest-first safety rule as a manual refresh.
+- **Unexpected reachability loss can be normal TV sleep.** Check the target display's
+  motion, ambient-light, and sleep settings before diagnosing a network failure. The
+  organizer does not manage those settings.
 
 ---
 

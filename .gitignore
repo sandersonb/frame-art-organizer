@@ -5,6 +5,8 @@
 .token*
 *.token
 config.toml
+config.local.toml
+config.*.local.toml
 .env
 
 # python
@@ -20,6 +22,10 @@ data/
 originals/
 derivatives/
 *.log
+*.jsonl
+backups/
+*.sqlite
+*.sqlite3
 state.db
 state.db-wal
 state.db-shm

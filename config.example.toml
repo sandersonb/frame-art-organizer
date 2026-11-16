@@ -6,14 +6,14 @@
 # committed. Only this template is tracked. Read by frame_art_organizer.config.
 
 [frame]
-host = "192.168.1.XXX"          # CHANGE ME: the Frame's LAN IP (SmartThings app or your router)
+host = "tv.example"             # CHANGE ME: your TV's hostname or address; .example is a placeholder
 port = 8002                     # TLS websocket (token auth) — leave at 8002
 token_file = ".token"           # pairing token, relative to this file. Gitignored — NEVER commit it.
 name = "FrameArtOrganizer"      # shows up in the TV's device list
 connect_timeout = 3.0           # seconds; the reachability probe before any API call
 
 [paths]
-# Dev defaults (relative to this file). On the Pi these become /srv/frame/... .
+# Relative to this file. Choose persistent storage paths suitable for your host.
 inbox       = "data/inbox"      # optional watched folder (e.g. an SMB share) for bulk drops
 originals   = "data/originals"  # preserved, content-addressed archive of originals
 derivatives = "data/derivatives" # rendered 3840x2160 JPEGs (regenerable cache)

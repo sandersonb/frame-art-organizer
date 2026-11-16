@@ -33,7 +33,7 @@ def process_record(path):
 
 def endpoint_address(value):
     address = bytes.fromhex(value.split(':')[0])
-    # /proc/net encodes each 32-bit word in native byte order on the Pi.
+    # Linux /proc/net encodes each 32-bit word in native byte order.
     import sys
     if sys.byteorder == 'little':
         address = b''.join(address[i:i+4][::-1] for i in range(0, len(address), 4))

@@ -5,13 +5,13 @@ display on a **Samsung The Frame** TV. You drop photos into a web UI, organize t
 collections, and a scheduler keeps the Frame's **native Art-Mode slideshow** rotating
 through them on whatever schedule you like — themed by day of week and time of day.
 
-The Pi (or any always-on host) owns the library and the scheduling; the TV keeps owning
+An always-on host owns the library and the scheduling; the TV keeps owning
 Art Mode (matte, ambient brightness, motion/night sleep). We drive the Frame's local Art
 API rather than piping HDMI, so its low-power behavior stays intact — and because the Art
 API is unreachable while the panel sleeps, the scheduler **can't wake the room**.
 
 - **[SAMSUNG_FRAME_API.md](SAMSUNG_FRAME_API.md)** — the reverse-engineered Frame Art API
-  (verified on a QN65LS03FAFXZA, API `5.0.1.0`): auth, power-state behavior, operations, caveats.
+  (observed behavior for Art API `5.0.1.0`): auth, power-state behavior, operations, caveats.
 - **[SPEC.md](SPEC.md)** — architecture, the SQLite schema, components, process model.
 - **[ORGANIZER_UI_SPEC.md](ORGANIZER_UI_SPEC.md)** — the web UI design.
 
@@ -60,6 +60,10 @@ running even if the host is offline, and honors the remote's "next".
 ---
 
 ## Quick start (dev, on your workstation)
+Requires Python **3.11 or newer** and a compatible TV reachable from the host.
+No particular host hardware, hostname, account name, or installation path is required.
+Examples use reserved `.example` hostnames; replace them only in your untracked configuration.
+
 ```sh
 python3 -m venv .venv
 ./.venv/bin/pip install -e '.[web,heic]'      # heic = iPhone photos; web = the UI
@@ -73,16 +77,25 @@ Open the UI, upload a few photos, then drive a one-off rotation to see it on the
 ./.venv/bin/fao schedule-refresh               # compose set → upload → start the slideshow
 ```
 
-## Deploy on a Raspberry Pi (the appliance)
+## Deploy on an always-on Linux host
+Choose an installation directory and an account that can write to the configured data
+and token locations. The following commands run from your checkout, wherever it is installed:
+
 ```sh
-git clone <repo> /opt/frame-art-organizer && cd /opt/frame-art-organizer
-python3 -m venv .venv && ./.venv/bin/pip install -e '.[web,heic]'
+python3 -m venv .venv
+./.venv/bin/pip install '.[web,heic]'
 cp config.example.toml config.toml             # then set [frame].host to your TV's IP at minimum
 ./.venv/bin/fao db-init
 ./.venv/bin/fao info                           # one-time pairing: accept Allow on the TV
-./.venv/bin/fao serve --daemon                 # web UI + scheduler → http://<pi-ip>:8080
+./.venv/bin/fao serve --daemon                 # web UI + scheduler
 ```
-Run it as a service (edit the paths inside the unit first):
+To make the UI available to other devices, set `serve --host` to an appropriate bind
+address for your trusted network. Do not expose it to the public internet.
+
+Run it as a service after editing `deploy/frame-art-organizer.service`: set `User` to
+your service account and replace every `/path/to/frame-art-organizer` with your actual
+installation directory. These are template values, not a required machine layout.
+
 ```sh
 sudo cp deploy/frame-art-organizer.service /etc/systemd/system/
 sudo systemctl daemon-reload
@@ -103,7 +116,7 @@ it. Paths and the token file are resolved relative to that file's location.
 ### `[frame]` — the TV connection
 ```toml
 [frame]
-host = "192.168.1.XXX"     # the Frame's LAN IP (find it in SmartThings or your router)
+host = "tv.example"       # placeholder: replace with your TV's hostname or address
 port = 8002               # TLS websocket with token auth — leave at 8002
 token_file = ".token"     # pairing token, written on first connect. NEVER commit it.
 name = "FrameArtOrganizer" # the name shown in the TV's device list
@@ -121,7 +134,7 @@ derivatives = "data/derivatives" # rendered 3840x2160 JPEGs (a regenerable cache
 database    = "data/state.db"    # the SQLite store
 ```
 Primary ingest is the web UI's upload; the `inbox` folder is an optional secondary path.
-On a Pi you'd typically point these at persistent storage (e.g. `/srv/frame/...`).
+For a long-running installation, point these at persistent storage writable by the service account.
 Web thumbnails are cached next to `derivatives` in a `thumbs/` dir (regenerable; keyed by the
 render they were made from).
 
@@ -307,8 +320,9 @@ SPEC.md  SAMSUNG_FRAME_API.md  ORGANIZER_UI_SPEC.md
 ```
 
 ## Notes & troubleshooting
-- **Capture a wedged Art API:** run `fao info --diagnose > /tmp/frame-info-diagnostic.log 2>&1`
-  and share that file. This read-only probe logs UTC timestamps and elapsed time for TCP,
+- **Capture a wedged Art API:** run `fao info --diagnose > frame-info-diagnostic.log 2>&1`.
+  Review and redact identifying device or environment details before sharing the file.
+  This read-only probe logs UTC timestamps and elapsed time for TCP,
   REST device info, the TLS/WebSocket upgrade, Samsung's `ms.channel.connect` / `ms.channel.ready`
   events, and the Art version/status/photo-list requests. It emits all-thread Python stacks every
   10 seconds while still running (including stuck cleanup/interpreter shutdown). It never logs
@@ -320,7 +334,8 @@ SPEC.md  SAMSUNG_FRAME_API.md  ORGANIZER_UI_SPEC.md
   Prefer one capture during a natural failure, not repeated probes to induce a wedge. Capture once
   before stopping the daemon to preserve the failure, then stop it to prevent background retries;
   a second capture, if needed, can show whether the problem persists without that traffic. Also
-  record whether restarting only the Pi service fixes it, or only power-cycling the One Connect box.
+  record whether restarting only the organizer service fixes it, or whether the TV's API
+  requires a hardware restart according to its manufacturer's instructions.
 - **The scheduler only acts when the TV is awake.** Asleep = a clean skip; a boundary
   crossed during sleep is applied on the next wake. This is by design and can't be
   bypassed (the API port is closed while the panel sleeps).
@@ -328,9 +343,17 @@ SPEC.md  SAMSUNG_FRAME_API.md  ORGANIZER_UI_SPEC.md
   *or* My Photos is empty (nothing to cycle). Add photos / check the period's collections.
 - **First connection hangs then a prompt appears on the TV** — accept *Allow*; the token
   is saved after that.
-- **Offline:** htmx/alpine load from a CDN today; vendor them locally for a fully offline Pi.
+- **Offline:** htmx/alpine load from a CDN today; vendor them locally for a fully offline installation.
+- **Gallery returns `no such column: ap.render_mode`:** a query that references an outer
+  policy alias in a subquery's `ORDER BY` is incompatible with older SQLite releases,
+  including 3.40.1. Update to the corrected query before attempting database repairs;
+  the error can occur even when the schema is current and the column exists.
 - **Backups:** the originals archive is the irreplaceable part; `state.db` is largely
   rebuildable, but back it up to keep collections/history/weights.
+
+## Contributing and sharing diagnostics
+Keep public examples generic and deployment details in untracked files. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for documentation privacy and reproducibility guidelines.
 
 ---
 

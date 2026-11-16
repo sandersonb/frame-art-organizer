@@ -253,7 +253,8 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--config', type=Path, default=Path('/opt/frame-art-organizer/config.toml'))
+    parser.add_argument('--config', type=Path, default=config.DEFAULT_CONFIG_PATH,
+                        help='Configuration file (default: config.toml in the working directory)')
     parser.add_argument('--output', type=Path, default=Path.home())
     parser.add_argument('--check-only', action='store_true')
     parser.add_argument('--summarize', type=Path, help='Analyze an existing JSONL log only; no TV access')
