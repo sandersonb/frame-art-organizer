@@ -34,6 +34,11 @@
       <button class="mi" @click="viewDetails({{ a.id }})">
         <svg class="ic"><use href="#ti-info-circle"></use></svg> View details
       </button>
+      {% if a.status == 'active' and a.width and a.height %}
+      <button class="mi" @click="openPresentation({{ a.id }})">
+        <svg class="ic"><use href="#ti-pencil"></use></svg> Adjust crop / matte
+      </button>
+      {% endif %}
       <button class="mi" @click="download({{ a.id }})">
         <svg class="ic"><use href="#ti-download"></use></svg> Download
       </button>

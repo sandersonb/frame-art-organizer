@@ -42,9 +42,9 @@ def describe(src_w, src_h, d_w, d_h, d_fit, pref_matte, pref_shape, img: ImageSe
         badges.append(Badge("pending", "not rendered yet",
                             "No derivative exists yet for the current settings; the next render creates it."))
     elif src_w and src_h:
-        matte = mattes.matte_for(pref_matte, pref_shape, d_w, d_h, img.matte)
+        matte = mattes.matte_for(pref_matte, pref_shape, d_w, d_h, img.matte, fit_mode=d_fit)
         src_wide = images.shape_class(src_w, src_h) == "wide"
-        if images.shape_class(d_w, d_h) == "odd":
+        if images.shape_class(d_w, d_h) == "odd" or d_fit == "matte":
             if matte == "none":
                 # No matte on a non-16:9 image: the TV center-crops it to fill the panel.
                 render, pct = "tvcrop", round(images.trim_fraction(d_w, d_h) * 100)
@@ -64,8 +64,13 @@ def describe(src_w, src_h, d_w, d_h, d_fit, pref_matte, pref_shape, img: ImageSe
                                 "Scaled to fit with neutral bars baked into the image."))
         else:
             render, pct = "crop", round(images.trim_fraction(src_w, src_h) * 100)
+            alignment = "centered"
+            if d_fit and d_fit.startswith("crop-"):
+                pos = int(d_fit[5:])
+                labels = ("left", "center", "right") if src_w / src_h > 16 / 9 else ("top", "middle", "bottom")
+                alignment = {0: labels[0], 500: labels[1], 1000: labels[2]}.get(pos, f"position {pos / 10:g} %")
             badges.append(Badge("crop", f"cropped {pct} %",
-                                f"Cropped to 16:9 (centered): {pct} % of the photo is trimmed."))
+                                f"Cropped to 16:9 ({alignment}): {pct} % of the photo is trimmed."))
     if low:
         badges.append(Badge("lowres", f"low-res {src_w}×{src_h}",
                             f"Under {img.low_res_long_edge} px on the long edge: the TV will scale it up "
@@ -78,26 +83,32 @@ def _pipeline_label(fit_mode, pipeline_version) -> str:
     return f"{fit_mode} v{pipeline_version}"
 
 
-def _matte_text(look: Look, pref_matte, pref_shape, d_w, d_h) -> str:
+def _matte_text(look: Look, pref_matte, pref_shape, d_w, d_h, fit_mode=None) -> str:
     m = look.matte
     if m is None:
         return "—"
+    if fit_mode and fit_mode.startswith("crop-"):
+        return "none — crop mode (TV matte choices are kept for later)"
     shape = images.shape_class(d_w, d_h)
-    if pref_matte and pref_shape and pref_shape == shape and mattes.valid_matte_string(pref_matte):
+    if (pref_matte and pref_shape == shape and mattes.valid_matte_string(pref_matte)
+            and mattes.normalize(pref_matte) == m):
         return f"{m} — chosen on the TV"
     text = f"{m} — default"
-    if pref_matte and pref_shape:
+    if fit_mode == "matte" and pref_shape == shape and mattes.normalize(pref_matte) == "none":
+        return text + " (Matte mode keeps the whole photo)"
+    if pref_matte and pref_shape and pref_shape != shape:
         made = "16:9" if pref_shape == "wide" else "non-16:9"
         text += (f" (your TV choice {pref_matte} was made for a {made} version of this photo, "
                  "so it isn't applied to this one)")
     return text
 
 
-def details(asset, deriv, pref_matte, pref_shape, placements, img: ImageSettings) -> dict:
+def details(asset, deriv, pref_matte, pref_shape, placements, img: ImageSettings, *, current_fit=None) -> dict:
     """Everything the details modal shows beyond the file facts: how it is rendered, what the
     configured pipeline would do with it, its matte, and what is on the TV. Read-only — the
     matte is changed on the TV and read back (SPEC.md §12.4)."""
     sw, sh = asset["width"], asset["height"]
+    current_fit = current_fit or img.default_fit
     d_w, d_h = (deriv["width"], deriv["height"]) if deriv else (None, None)
     look = describe(sw, sh, d_w, d_h, deriv["fit_mode"] if deriv else None, pref_matte, pref_shape, img)
 
@@ -106,13 +117,15 @@ def details(asset, deriv, pref_matte, pref_shape, placements, img: ImageSettings
         render = {"width": d_w, "height": d_h, "fit_mode": deriv["fit_mode"],
                   "pipeline_version": deriv["pipeline_version"],
                   "pipeline": _pipeline_label(deriv["fit_mode"], deriv["pipeline_version"]),
-                  "current": (deriv["fit_mode"], deriv["pipeline_version"]) == (img.default_fit, img.pipeline_version),
+                  "current": (deriv["fit_mode"], deriv["pipeline_version"]) == (current_fit, img.pipeline_version),
                   "kind": look.render, "crop_pct": look.crop_pct}
 
     plan = None
-    if img.default_fit == "auto" and sw and sh:
-        p = images.plan_render(sw, sh, img.crop_tolerance)
-        m = mattes.matte_for(pref_matte, pref_shape, p.size[0], p.size[1], img.matte)
+    if (current_fit in ("auto", "matte") or current_fit.startswith("crop-")) and sw and sh:
+        mode = "crop" if current_fit.startswith("crop-") else current_fit
+        position = int(current_fit[5:]) if mode == "crop" else 500
+        p = images.plan_render(sw, sh, img.crop_tolerance, mode=mode, position=position)
+        m = mattes.matte_for(pref_matte, pref_shape, p.size[0], p.size[1], img.matte, fit_mode=current_fit)
         if p.kind == "fill":
             how = (f"fill — {round(p.trim * 100)} % trimmed to 16:9" if p.crop else "fill — already 16:9")
             text = f"{how}, {p.size[0]} × {p.size[1]}"
@@ -123,7 +136,7 @@ def details(asset, deriv, pref_matte, pref_shape, placements, img: ImageSettings
 
     tv = [{"content_id": p["content_id"], "matte": p["matte"], "width": p["width"], "height": p["height"],
            "pipeline": _pipeline_label(p["fit_mode"], p["pipeline_version"]),
-           "current": (p["fit_mode"], p["pipeline_version"]) == (img.default_fit, img.pipeline_version)}
+           "current": (p["fit_mode"], p["pipeline_version"]) == (current_fit, img.pipeline_version)}
           for p in placements]
 
     return {
@@ -132,6 +145,6 @@ def details(asset, deriv, pref_matte, pref_shape, placements, img: ImageSettings
         "low_res": look.low_res,
         "badges": [{"kind": b.kind, "text": b.text, "title": b.title} for b in look.badges],
         "matte": {"policy": look.matte, "chosen_on_tv": pref_matte, "chosen_shape": pref_shape,
-                  "text": _matte_text(look, pref_matte, pref_shape, d_w, d_h)},
+                  "text": _matte_text(look, pref_matte, pref_shape, d_w, d_h, deriv["fit_mode"] if deriv else None)},
         "on_tv": tv,
     }

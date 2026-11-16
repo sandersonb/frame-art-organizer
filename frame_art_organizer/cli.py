@@ -290,7 +290,8 @@ def cmd_schedule_show(args) -> int:
         print(f"  asset={r['asset_id']:<4} pinned={r['pinned']}  {r['original_name']}")
     print(f"currently resident={len(present)} → would add {len(to_add)}, remove {len(to_remove)}")
     current = sum(1 for p in present
-                  if (p["fit_mode"], p["pipeline_version"]) == (img.default_fit, img.pipeline_version))
+                  if store.derivative_is_current(conn, p["asset_id"], p["fit_mode"], p["pipeline_version"],
+                                                 img.default_fit, img.pipeline_version))
     print(f"pipeline      : {img.default_fit} v{img.pipeline_version} — resident on it: "
           f"{current}/{len(present)}" + (f", {len(present) - current} stale (a refresh swaps them)"
                                          if len(present) > current else ""))
@@ -355,14 +356,15 @@ def _schedule_refresh(args, conn, paths, cfg, fc) -> int:
 
 def _plan_rows(conn, img: config.ImageSettings, tolerance: float) -> list[dict]:
     """What the v2 pipeline WOULD do with each active photo. Pure reads; renders nothing."""
-    prefs = store.asset_matte_prefs(conn)
     rows = []
     for a in store.list_assets(conn):
         if a["status"] != "active" or not a["width"] or not a["height"]:
             continue
-        plan = images.plan_render(a["width"], a["height"], tolerance)
-        pref_matte, pref_shape = prefs.get(a["id"], (None, None))
-        matte = mattes.matte_for(pref_matte, pref_shape, plan.size[0], plan.size[1], img.matte)
+        mode, position = store.get_presentation(conn, a["id"])
+        plan = images.plan_render(a["width"], a["height"], tolerance, mode=mode, position=position)
+        pref_matte, pref_shape = store.get_matte_pref(conn, a["id"], plan.shape)
+        key = images.render_key(mode, position, img.default_fit)
+        matte = mattes.matte_for(pref_matte, pref_shape, plan.size[0], plan.size[1], img.matte, fit_mode=key)
         rows.append({
             "id": a["id"], "name": a["original_name"], "source": plan.source, "trim": plan.trim,
             "kind": plan.kind, "size": plan.size, "shape": plan.shape, "matte": matte,

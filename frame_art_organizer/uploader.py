@@ -14,7 +14,7 @@ import sqlite3
 from pathlib import Path
 
 from . import harvest as harvest_mod
-from . import mattes, store, upload_recovery
+from . import images, mattes, store, upload_recovery
 from .frame_client import FrameAsleep, FrameClient, FrameUploadUncertain
 from .device_lock import serialized_device
 
@@ -34,7 +34,8 @@ def sync(client: FrameClient, conn: sqlite3.Connection, *, device_id: int,
         return summary
     baseline = upload_recovery.inventory_ids(client.list_my_photos())
     for d in derivatives:
-        matte = mattes.matte_for(d["pref_matte"], d["pref_shape"], d["width"], d["height"], matte_cfg)
+        pref = store.get_matte_pref(conn, d["asset_id"], images.shape_class(d["width"], d["height"]))
+        matte = mattes.matte_for(*pref, d["width"], d["height"], matte_cfg, fit_mode=d["fit_mode"])
         placement_id = store.create_pending_placement(conn, device_id, d["derivative_id"], matte,
                                                        baseline=baseline)
         log.info("upload.begin placement=%s asset=%s bytes_from=%s", placement_id, d["asset_id"], d["original_name"])

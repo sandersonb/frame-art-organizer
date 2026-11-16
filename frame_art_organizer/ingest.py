@@ -7,6 +7,7 @@ archive and preserved; removing a file from the inbox does NOT remove the asset.
 from __future__ import annotations
 
 import sqlite3
+import uuid
 from pathlib import Path
 
 from . import images, store
@@ -60,13 +61,42 @@ def render_pending(conn: sqlite3.Connection, paths: dict, fit_mode: str,
                    pipeline_version: int, quality: int, crop_tolerance: float = 0.16) -> int:
     rendered = 0
     for a in store.assets_needing_render(conn, fit_mode, pipeline_version):
-        dest = Path(paths["derivatives"]) / f"{a['sha256']}_{fit_mode}_v{pipeline_version}.jpg"
-        info = images.render_to_file(a["original_path"], dest, mode=fit_mode, quality=quality,
-                                     crop_tolerance=crop_tolerance)
-        store.add_derivative(
-            conn, asset_id=a["id"], path=str(dest), sha256=info["sha256"],
-            fit_mode=fit_mode, width=info["width"], height=info["height"],
-            pipeline_version=pipeline_version,
-        )
+        ensure_derivative(conn, paths, a, a["render_key"], pipeline_version, quality, crop_tolerance)
         rendered += 1
     return rendered
+
+
+def ensure_derivative(conn, paths, asset, fit_mode, pipeline_version, quality, crop_tolerance=0.16):
+    """Render from the archived ORIGINAL, never from an already-cropped derivative.
+
+    CPU/file work happens before the short writer transaction. Concurrent web/daemon
+    renders get separate files and re-check the unique cache key before publishing.
+    """
+    def existing():
+        return conn.execute("SELECT * FROM derivative WHERE asset_id=? AND fit_mode=? AND pipeline_version=?",
+                            (asset["id"], fit_mode, pipeline_version)).fetchone()
+
+    row = existing()
+    if row is not None and Path(row["path"]).is_file():
+        return row
+    dest = Path(paths["derivatives"]) / f"{asset['sha256']}_{fit_mode}_v{pipeline_version}_{uuid.uuid4().hex}.jpg"
+    try:
+        info = images.render_to_file(asset["original_path"], dest, mode=fit_mode, quality=quality,
+                                     crop_tolerance=crop_tolerance)
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        with conn:
+            row = existing()
+            if row is None:
+                store.add_derivative(conn, asset_id=asset["id"], path=str(dest), sha256=info["sha256"],
+                                     fit_mode=fit_mode, width=info["width"], height=info["height"],
+                                     pipeline_version=pipeline_version, commit=False)
+            elif not Path(row["path"]).is_file():
+                conn.execute("UPDATE derivative SET path=? WHERE id=?", (str(dest), row["id"]))
+            row = existing()
+        if row["path"] != str(dest):
+            dest.unlink(missing_ok=True)  # another renderer published this key first
+        return row
+    except Exception:
+        dest.unlink(missing_ok=True)  # only this invocation's unreferenced file
+        raise

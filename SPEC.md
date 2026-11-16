@@ -431,7 +431,8 @@ Rules (periods, collections, intervals, sizes) live here. Only **runtime overrid
   2026-09-23). Revisit only if a future firmware/API adds one.
 - **Favourites (`MY-C0004`) split** — if excluding manual adds / fine-grained time-of-day
   themes becomes a real need (removes set-swap churn).
-- **Focal-point / crop editor** — for FILL crops that cut a subject. `ImageOps.fit` already
+- **Focal-point / crop editor** — **built as the per-photo presentation editor (§13)**.
+  Original rationale: for FILL crops that cut a subject. `ImageOps.fit` already
   takes `centering=(x, y)`, so a one-click "set focus" is the cheap form; it needs a
   per-asset value that changes the *pixels* (so a derivative key) and a re-upload — which
   is only safe once matte persistence (§12.4) exists.
@@ -762,3 +763,64 @@ This is the one step that ends the instant rollback — do it only when you are 
 **Exit (M3 done)** — canary photos looked right; the post-migration diff shows the same photo
 count with native sizes and policy mattes; the harvested edits that should carry over did; the
 daemon is running and its refresh is a no-op.
+
+---
+
+## 13. Per-photo presentation overrides (built 2026-11-15)
+
+This extends the v2 pixel/matte split and supersedes §11/§12's crop-editor deferral;
+it does **not** retry the broken matte setter or replace the TV's matte-style UI.
+Interaction: `ORGANIZER_UI_SPEC.md` §8.
+
+### Intent and geometry
+`auto` is the default for every asset, following the configured pipeline exactly as
+before. `matte` forces FIT (whole original, no baked padding); `crop` forces FILL to 16:9
+at the chosen position. Both manual modes are native-resolution/downscale-only even
+under a legacy global `cover` configuration. Returning to Auto restores that global
+configuration's behavior; it does not change `config.toml` or the whole library.
+
+Crop position is an integer 0..1000 along the trimmed axis: 0 = left/top, 500 =
+center/middle, 1000 = right/bottom. With the planner's integer crop dimensions `cw,ch`,
+`left=(w-cw)*position//1000`, `top=(h-ch)*position//1000`. The browser uses those same
+dimensions and floor arithmetic; no separate browser aspect-ratio rounding heuristic.
+EXIF orientation is applied before planning, preview and rendering.
+
+### Migration 6 (additive)
+- `asset_policy.render_mode TEXT NOT NULL DEFAULT 'auto'`, constrained to
+  `auto|matte|crop`.
+- `asset_policy.crop_position INTEGER NOT NULL DEFAULT 500`, range 0..1000.
+- `asset_matte(asset_id, shape, matte)`, primary key `(asset_id,shape)`; `shape` is
+  `wide|odd`. Backfill the existing stored preference. Continue maintaining the legacy
+  `asset_policy.matte/matte_shape` as the most recent TV choice, but prefer the matching
+  shape's remembered choice for uploads. This prevents a TV edit on a cropped copy from
+  destroying the earlier whole-photo matte choice. No device or pixel rows change on migration.
+
+### Derivatives and replacement
+Keep the existing derivative unique key `(asset_id,fit_mode,pipeline_version)`:
+`fit_mode` is the configured default for Auto, `matte` for whole-photo intent, or
+`crop-<position>` (e.g. `crop-237`). A changed crop gets a separate row/file/thumbnail,
+not an UPDATE of the old pixels; identical settings can reuse their cached render.
+Render the original into a private file before a short serialized publication transaction;
+a failed render leaves the previous policy/render active. Re-check the key when another
+renderer wins the race. Old placements remain valid until normal reconciliation.
+
+All current-derivative queries (pending render, selection, sync, gallery, stale counts,
+purge) use the effective per-asset key. Saved refresh batches become superseded if an
+asset's presentation no longer matches them. Gallery and details describe the actual
+selected derivative; details distinguish it from the resident TV copy. `plan-report`
+and `schedule-show` account for manual presentation too.
+
+Manual Crop uploads with `none` (full bleed) without erasing any TV matte preference.
+Manual Matte uploads with a compatible remembered non-`none` choice, else the configured
+FIT matte (including for already-16:9 images and with `auto_matte=false`). Subsequent
+style/color edits are still made on the TV and harvested; no matte setters are called.
+Never send `modern*` or another unverified type for an odd-shaped whole original.
+The existing bounded/reachability-gated, harvest-first, add-before-remove replacement
+path and unresolved-upload protections remain in charge of all TV changes.
+
+### Validation
+Tests cover geometry at both ends/intermediate positions and multiple aspect ratios,
+EXIF orientation, no upscaling, original preservation, Auto reset/deduplication,
+matte-to-crop-to-matte reuse, shape-scoped matte preservation, selection/batch/purge
+integration, failed renders, failed harvest/upload retention, preview cache separation,
+and truthful pending TV details. No live TV experiment or deployment is part of this feature.

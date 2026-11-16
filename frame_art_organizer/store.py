@@ -48,15 +48,47 @@ def get_asset(conn, asset_id) -> sqlite3.Row | None:
     return conn.execute("SELECT * FROM asset WHERE id = ?", (asset_id,)).fetchone()
 
 
-# Which derivative stands for a photo in the UI: the one at the configured pipeline if it exists
-# (so after a rollback the gallery shows what the TV shows), else the newest. The two `?` are
-# (fit_mode, pipeline_version); NULLs simply fall through to "newest".
-_PREFER_CURRENT = "ORDER BY (fit_mode = ? AND pipeline_version = ?) DESC, pipeline_version DESC"
+# Which derivative stands for a photo in the UI: the one at its effective presentation
+# and configured pipeline if it exists, else the newest. The two `?` are
+# (default fit_mode, pipeline_version); NULLs simply fall through to "newest".
+# `ap` is the photo's policy; the placeholder is the configured default fit. Manual
+# settings are encoded in fit_mode so changing pixels creates a NEW derivative/placement,
+# never mutates a file the TV (or an in-flight upload) still uses.
+_RENDER_KEY = """CASE COALESCE(ap.render_mode,'auto')
+    WHEN 'crop' THEN 'crop-' || ap.crop_position WHEN 'matte' THEN 'matte' ELSE ? END"""
+_PREFER_CURRENT = (f"ORDER BY (fit_mode = ({_RENDER_KEY}) AND pipeline_version = ?) DESC, "
+                  "pipeline_version DESC, id DESC")
+
+
+def get_presentation(conn, asset_id) -> tuple[str, int]:
+    row = conn.execute("SELECT render_mode,crop_position FROM asset_policy WHERE asset_id=?",
+                       (asset_id,)).fetchone()
+    return (row["render_mode"], row["crop_position"]) if row else ("auto", 500)
+
+
+def set_presentation(conn, asset_id, mode, position) -> None:
+    """Does not commit: publish settings together with their completed derivative."""
+    images.render_key(mode, position)
+    conn.execute("INSERT OR IGNORE INTO asset_policy (asset_id) VALUES (?)", (asset_id,))
+    conn.execute("UPDATE asset_policy SET render_mode=?,crop_position=? WHERE asset_id=?",
+                 (mode, position, asset_id))
+
+
+def current_render_key(conn, asset_id, default_fit) -> str:
+    return images.render_key(*get_presentation(conn, asset_id), default_fit=default_fit)
+
+
+def derivative_is_current(conn, asset_id, fit_mode, pipeline_version, default_fit, current_version) -> bool:
+    return (fit_mode, pipeline_version) == (current_render_key(conn, asset_id, default_fit), current_version)
 
 
 def get_any_derivative(conn, asset_id, fit_mode=None, pipeline_version=None) -> sqlite3.Row | None:
     return conn.execute(
-        f"SELECT * FROM derivative WHERE asset_id = ? {_PREFER_CURRENT} LIMIT 1",
+        f"""SELECT d.* FROM derivative d
+            LEFT JOIN asset_policy ap ON ap.asset_id=d.asset_id
+            WHERE d.asset_id = ?
+            ORDER BY (d.fit_mode=({_RENDER_KEY}) AND d.pipeline_version=?) DESC,
+                     d.pipeline_version DESC, d.id DESC LIMIT 1""",
         (asset_id, fit_mode, pipeline_version),
     ).fetchone()
 
@@ -101,9 +133,9 @@ def list_gallery(conn, filt: str = "all", sort: str = "newest",
              d.fit_mode AS d_fit, d.pipeline_version AS d_pv,
              ap.matte AS pref_matte, ap.matte_shape AS pref_shape
            FROM asset a
-           LEFT JOIN derivative d ON d.id = (
+            LEFT JOIN asset_policy ap ON ap.asset_id = a.id
+            LEFT JOIN derivative d ON d.id = (
                SELECT id FROM derivative WHERE asset_id = a.id {_PREFER_CURRENT} LIMIT 1)
-           LEFT JOIN asset_policy ap ON ap.asset_id = a.id
            WHERE {' AND '.join(where)}
            ORDER BY {order}"""
     return conn.execute(sql, [fit_mode, pipeline_version] + params).fetchall()
@@ -139,13 +171,14 @@ def superseded_derivatives(conn, fit_mode, pipeline_version) -> list[sqlite3.Row
     """Derivatives that are not at the configured pipeline (nor from a newer one), whose photo has
     one that is, and that no present/pending placement uses. Candidates only — purge.py decides."""
     return conn.execute(
-        """SELECT old.id AS id, old.asset_id AS asset_id, old.path AS path,
+        f"""SELECT old.id AS id, old.asset_id AS asset_id, old.path AS path,
                   old.pipeline_version AS pipeline_version, old.fit_mode AS fit_mode,
                   cur.path AS replacement_path, cur.rendered_at AS replacement_rendered_at
            FROM derivative old
+           LEFT JOIN asset_policy ap ON ap.asset_id=old.asset_id
            JOIN derivative cur ON cur.asset_id = old.asset_id
-                              AND cur.fit_mode = ? AND cur.pipeline_version = ?
-           WHERE NOT (old.fit_mode = ? AND old.pipeline_version = ?)
+                              AND cur.fit_mode = ({_RENDER_KEY}) AND cur.pipeline_version = ?
+           WHERE NOT (old.fit_mode = ({_RENDER_KEY}) AND old.pipeline_version = ?)
              AND old.pipeline_version <= ?
              AND NOT EXISTS (SELECT 1 FROM placement p WHERE p.derivative_id = old.id
                               AND (p.state IN ('present','pending') OR p.upload_outcome='uncertain'))
@@ -157,9 +190,10 @@ def superseded_derivatives(conn, fit_mode, pipeline_version) -> list[sqlite3.Row
 def stale_resident_count(conn, fit_mode, pipeline_version) -> int:
     """Placements on the TV (or about to be) whose derivative is not at the configured pipeline."""
     return conn.execute(
-        """SELECT COUNT(*) FROM placement p JOIN derivative d ON d.id = p.derivative_id
+        f"""SELECT COUNT(*) FROM placement p JOIN derivative d ON d.id = p.derivative_id
+            LEFT JOIN asset_policy ap ON ap.asset_id=d.asset_id
             WHERE (p.state IN ('present','pending') OR p.upload_outcome='uncertain')
-             AND NOT (d.fit_mode = ? AND d.pipeline_version = ?)""",
+             AND NOT (d.fit_mode = ({_RENDER_KEY}) AND d.pipeline_version = ?)""",
         (fit_mode, pipeline_version),
     ).fetchone()[0]
 
@@ -185,15 +219,20 @@ def purge_derivative(conn, derivative_id) -> int:
     return n
 
 
-def get_matte_pref(conn, asset_id) -> tuple:
+def get_matte_pref(conn, asset_id, shape=None) -> tuple:
     """(matte, matte_shape) the user chose on the TV for this asset, or (None, None)."""
+    if shape is not None:
+        r = conn.execute("SELECT matte,shape FROM asset_matte WHERE asset_id=? AND shape=?",
+                         (asset_id, shape)).fetchone()
+        if r:
+            return r["matte"], r["shape"]
     r = conn.execute("SELECT matte, matte_shape FROM asset_policy WHERE asset_id = ?", (asset_id,)).fetchone()
     return (r["matte"], r["matte_shape"]) if r else (None, None)
 
 
 def present_placements_for_asset(conn, asset_id) -> list[sqlite3.Row]:
     return conn.execute(
-        """SELECT p.id, p.content_id, p.device_id, p.matte AS matte,
+        """SELECT p.id, p.content_id, p.device_id, p.matte AS matte, d.id AS derivative_id,
                   d.width AS width, d.height AS height,
                   d.fit_mode AS fit_mode, d.pipeline_version AS pipeline_version
            FROM placement p JOIN derivative d ON d.id = p.derivative_id
@@ -218,25 +257,27 @@ def counts(conn: sqlite3.Connection) -> dict:
 def assets_needing_render(conn: sqlite3.Connection, fit_mode: str,
                           pipeline_version: int) -> list[sqlite3.Row]:
     return conn.execute(
-        """SELECT a.* FROM asset a
+        f"""SELECT a.*, ({_RENDER_KEY}) AS render_key FROM asset a
+           LEFT JOIN asset_policy ap ON ap.asset_id=a.id
            WHERE a.status = 'active'
              AND NOT EXISTS (
                SELECT 1 FROM derivative d
                WHERE d.asset_id = a.id
-                 AND d.fit_mode = ? AND d.pipeline_version = ?)""",
-        (fit_mode, pipeline_version),
+                 AND d.fit_mode = ({_RENDER_KEY}) AND d.pipeline_version = ?)""",
+        (fit_mode, fit_mode, pipeline_version),
     ).fetchall()
 
 
 def add_derivative(conn: sqlite3.Connection, *, asset_id, path, sha256, fit_mode,
-                   width, height, pipeline_version) -> int:
+                   width, height, pipeline_version, commit=True) -> int:
     cur = conn.execute(
         """INSERT INTO derivative
              (asset_id, path, sha256, fit_mode, width, height, pipeline_version, rendered_at)
            VALUES (?,?,?,?,?,?,?,?)""",
         (asset_id, path, sha256, fit_mode, width, height, pipeline_version, now()),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return cur.lastrowid
 
 
@@ -300,14 +341,14 @@ def derivatives_to_upload(conn: sqlite3.Connection, device_id, fit_mode,
                           pipeline_version) -> list[sqlite3.Row]:
     """Current derivatives of active assets with no present/pending placement here."""
     return conn.execute(
-        """SELECT d.id AS derivative_id, d.path AS path, a.id AS asset_id,
+        f"""SELECT d.id AS derivative_id, d.path AS path, a.id AS asset_id, d.fit_mode AS fit_mode,
                   a.captured_at AS captured_at, a.original_name AS original_name,
                   d.width AS width, d.height AS height,
                   ap.matte AS pref_matte, ap.matte_shape AS pref_shape
            FROM derivative d
            JOIN asset a ON a.id = d.asset_id
            LEFT JOIN asset_policy ap ON ap.asset_id = a.id
-           WHERE a.status = 'active' AND d.fit_mode = ? AND d.pipeline_version = ?
+           WHERE a.status = 'active' AND d.fit_mode = ({_RENDER_KEY}) AND d.pipeline_version = ?
              AND NOT EXISTS (
                SELECT 1 FROM placement p
                WHERE p.derivative_id = d.id AND p.device_id = ?
@@ -389,6 +430,10 @@ def set_asset_matte(conn, asset_id, matte, shape) -> None:
         "UPDATE asset_policy SET matte = ?, matte_shape = ? WHERE asset_id = ?",
         (matte, shape, asset_id),
     )
+    if shape in ("wide", "odd"):
+        conn.execute("""INSERT INTO asset_matte (asset_id,shape,matte) VALUES (?,?,?)
+                        ON CONFLICT(asset_id,shape) DO UPDATE SET matte=excluded.matte""",
+                     (asset_id, shape, matte))
 
 
 def asset_matte_prefs(conn) -> dict:
@@ -566,15 +611,15 @@ def compose_working_set(conn, *, device_id, collections, fit_mode, pipeline_vers
     else:
         col_join = ""  # empty → no collection filter → the whole active library
     sql = f"""
-        SELECT d.id AS derivative_id, a.id AS asset_id, d.path AS path,
+        SELECT d.id AS derivative_id, a.id AS asset_id, d.path AS path, d.fit_mode AS fit_mode,
                a.captured_at AS captured_at, a.original_name AS original_name,
                COALESCE(ap.pinned, 0) AS pinned,
                d.width AS width, d.height AS height,
                ap.matte AS pref_matte, ap.matte_shape AS pref_shape
         FROM asset a
         {col_join}
-        JOIN derivative d ON d.asset_id = a.id AND d.fit_mode = ? AND d.pipeline_version = ?
         LEFT JOIN asset_policy ap ON ap.asset_id = a.id
+        JOIN derivative d ON d.asset_id = a.id AND d.fit_mode = ({_RENDER_KEY}) AND d.pipeline_version = ?
         WHERE a.status = 'active' AND COALESCE(ap.suppressed, 0) = 0
         GROUP BY a.id
         ORDER BY

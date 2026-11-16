@@ -69,7 +69,7 @@ class MatteConfig:
     auto_matte: bool = True              # False = odd photos upload with "none" (the TV crops)
 
 
-def matte_for(pref_matte, pref_shape, width, height, cfg: MatteConfig) -> str:
+def matte_for(pref_matte, pref_shape, width, height, cfg: MatteConfig, *, fit_mode=None) -> str:
     """The matte to upload this photo with. Pure.
 
     1. A matte the user chose on the TV is re-applied, but ONLY to a derivative of the same
@@ -78,15 +78,27 @@ def matte_for(pref_matte, pref_shape, width, height, cfg: MatteConfig) -> str:
     2. Otherwise the default for the derivative's shape: `default_matte` for 16:9 ("wide"),
        `fit_matte` for anything else ("odd") unless auto-matte is off.
     3. An unknown size gets "none" — the safest value (the TV simply crops).
+
+    Per-photo presentation overrides: ``crop-*`` requests full bleed (none);
+    ``matte`` requests a non-none compatible matte, even with auto-matte off.
+    Neither changes the stored TV preferences.
     """
     from .images import shape_class  # local import: keeps this module free of Pillow at import
 
+    if fit_mode and fit_mode.startswith("crop-"):
+        return "none"  # explicit full-bleed intent; do not erase the remembered TV matte
     shape = shape_class(width, height)
     if pref_matte and pref_shape and shape is not None and pref_shape == shape:
-        if valid_matte_string(pref_matte):
+        value = normalize(pref_matte)
+        safe = value == "none" or shape != "odd" or value.partition("_")[0] in ODD_ALLOWED
+        if valid_matte_string(pref_matte) and safe and not (fit_mode == "matte" and value == "none"):
             return normalize(pref_matte)
-        log.warning("ignoring stored matte %r: not in the TV's vocabulary; using the default",
-                    pref_matte)
+        if not valid_matte_string(pref_matte):
+            log.warning("ignoring stored matte %r: not in the TV's vocabulary; using the default", pref_matte)
+        elif not safe:
+            log.warning("ignoring unsafe stored matte %r for shape %s; using the default", pref_matte, shape)
+    if fit_mode == "matte" and shape is not None:
+        return cfg.fit_matte  # explicit whole-photo intent, including already-16:9 photos
     if shape == "wide":
         return cfg.default_matte
     if shape == "odd":

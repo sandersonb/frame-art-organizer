@@ -19,7 +19,7 @@ from pathlib import Path
 from samsungtvws import exceptions
 
 from . import harvest as harvest_mod
-from . import batches, mattes, store, upload_recovery
+from . import batches, images, mattes, store, upload_recovery
 from .frame_client import FrameAsleep, FrameClient, FrameConnectionError, FrameUploadUncertain
 from .device_lock import serialized_device
 
@@ -175,7 +175,6 @@ def refresh(client: FrameClient, conn: sqlite3.Connection, *, device_id, period,
     # edit the user made on the TV since the last run (just harvested above) would otherwise be
     # missed by this run's uploads: the old item is deleted, the new one gets the stale matte,
     # and the edit is lost for good. (Found by the migration dress rehearsal.)
-    prefs = store.asset_matte_prefs(conn)
     adds = to_add if limit is None else to_add[:max(0, limit)]
     added_assets: set[int] = set()
     mattes_used: dict[str, int] = {}
@@ -184,8 +183,9 @@ def refresh(client: FrameClient, conn: sqlite3.Connection, *, device_id, period,
         if not budget_available():
             break
         operations += 1
-        pref_matte, pref_shape = prefs.get(r["asset_id"], (None, None))
-        matte = mattes.matte_for(pref_matte, pref_shape, r["width"], r["height"], matte_cfg)
+        pref_matte, pref_shape = store.get_matte_pref(conn, r["asset_id"], images.shape_class(r["width"], r["height"]))
+        matte = mattes.matte_for(pref_matte, pref_shape, r["width"], r["height"], matte_cfg,
+                                 fit_mode=r["fit_mode"])
         placement_id = store.create_pending_placement(conn, device_id, r["derivative_id"], matte,
                                                        baseline=baseline)
         log.info("upload.begin placement=%s asset=%s", placement_id, r["asset_id"])

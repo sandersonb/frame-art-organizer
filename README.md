@@ -152,6 +152,22 @@ Note: the Frame's info overlay can show a photo's **date** (taken from EXIF on i
 **not a custom title** — that's a platform limitation (see SAMSUNG_FRAME_API.md). "Rename"
 in the UI sets a local label only.
 
+### Adjust one photo's crop / matte
+Open **Adjust crop / matte** from the photo's menu or **View details**:
+- **Auto** keeps today's upload detection; use it to reset an override.
+- **Matte** restores the whole original and lets the Frame matte it. Pick colors and
+  styles **on the TV**, as before; compatible TV choices are remembered.
+- **Crop** fills 16:9 without a matte. The yellow outline marks what stays. Choose
+  **Left / Center / Right** or **Top / Middle / Bottom**, then fine-tune with the slider.
+
+Save generates a local render without changing the original or upscaling it. The gallery
+updates immediately; the TV changes at a scheduled refresh when that photo is selected
+and the TV is available. You can run `fao schedule-refresh` for a deliberate refresh;
+it still uses normal collection/working-set selection, harvest and replacement safeguards.
+Cancel leaves the saved settings unchanged. Uploads and deduplication behave as before.
+Changing a matte **style/color** never requires the app to render matte pixels or call the
+TV's broken matte-change API. See `ORGANIZER_UI_SPEC.md` §8 and `SPEC.md` §13.
+
 ### `[schedule]` — rotation defaults
 ```toml
 [schedule]

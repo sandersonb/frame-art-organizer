@@ -81,7 +81,7 @@ def test_migration_quarantines_legacy_errors_without_changing_history(tmp_path):
     c.execute("INSERT INTO placement(device_id,derivative_id,state) VALUES (?,?,'present')", (dev, invalid))
     c.commit()
     before = c.execute("SELECT id,state,content_id FROM placement").fetchall()
-    assert db.migrate(c) == 5
+    assert db.migrate(c) == 6
     assert c.execute("SELECT id,state,content_id FROM placement").fetchall() == before
     assert len(store.unresolved_uploads(c, dev)) == 3
     with pytest.raises(store.UploadResolutionRequired): store.require_resolved_uploads(c, dev)

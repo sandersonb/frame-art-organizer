@@ -9,6 +9,9 @@ column** (`collection.color`), a handful of thin endpoints (mostly loops over lo
 already have), and a substantial but self-contained **front-end** rebuild. No changes to
 `asset` / `derivative` / `placement` / `ingest` / `scheduler` / `frame_client`.
 
+**Extension:** §8 adds per-photo crop/matte presentation and the necessary render/selection
+changes. The original front-end-only constraint above applies to the organizer, not this editor.
+
 > **Frame reality check:** `Rename` and per-photo display names are **local library
 > labels only** — the Frame cannot show custom titles (proven in `SAMSUNG_FRAME_API.md`).
 > Nothing in this UI changes what text appears on the TV; it only organizes our library.
@@ -211,3 +214,47 @@ modal, new-collection popover, grid/list views, sort — split into partials + A
 4. **Multi-select + bulk bar.**
 5. **Modals:** details, upload, new-collection popover.
 6. Polish: list view, empty states, mobile breakpoints.
+
+---
+
+## 8. Per-photo crop / matte editor
+
+**Built 2026-11-15.** Open **Adjust crop / matte** from a photo's menu or details view.
+Uploads are unchanged: new photos have no override and follow the configured automatic
+pipeline (including its existing crop tolerance). No upload-time dialogs are added.
+
+### Interaction
+- A modal has the **whole original** on the left and **Auto / Matte / Crop** controls on
+  the right; these stack vertically on narrow screens. It is a native dialog with focus
+  containment, Escape/Cancel, a labeled heading and keyboard-operable controls.
+- **Auto:** remove the manual override and follow the current configured pipeline again.
+- **Matte:** render the whole original, without padding or upscaling. The **TV** adds the
+  matte; colors/styles are still selected on the TV. Upload with a compatible remembered
+  non-`none` matte, else the configured `fit_matte_type` / `fit_matte_color`, even for 16:9
+  photos or when automatic matting is disabled. No simulated matte-style preview is claimed.
+- **Crop:** render a fixed 16:9 crop, downscale-only, uploaded with matte `none`.
+  A **yellow rectangle** marks what stays; the discarded area is shaded. For too-wide
+  originals use **Left / Center / Right**; for too-tall originals **Top / Middle / Bottom**.
+  A **fine-position slider** (0..1000) allows intermediate alignment without drag/zoom
+  complexity. Hide positioning when no pixels need trimming. Show the trim percentage.
+- The original preview is EXIF-oriented and browser-decodable JPEG, including HEIC inputs.
+  It is independent of the gallery thumbnail: an existing crop must never hide discarded
+  pixels from the editor. Geometry comes from the same render planner used for saving.
+- **Cancel / Escape** discards local edits; **Save changes** renders before publishing the
+  settings. Show rendering progress and errors, and keep the editor open on failure.
+  Refresh gallery thumbnails/badges after success, with a new derivative-keyed URL.
+- Saving is **local**, not an immediate TV command. Tell the user the Frame updates at a
+  scheduled refresh **when the photo is selected and the TV is available**. Details still
+  report the actual resident placement until replacement succeeds.
+
+### Persistence and safety
+See `SPEC.md` §13 for migration 6 and immutable cache keys. Returning to a previous setting
+can reuse its completed derivative. Every render starts from the archived original.
+The scheduler/uploader, gallery, CLI reports, paused batches and purge all respect the
+per-photo key; selection must not continue using an old automatic or centered crop.
+
+The old TV constraints remain binding (`SAMSUNG_FRAME_API.md` §7.5–7.6):
+**never call `change_matte`, never bake matte pixels into the photo, never apply a
+wide-only matte to a whole non-16:9 image**. Remember TV matte choices separately for
+`wide` and `odd` shapes. Harvest before replacement; add before remove; if harvest/upload
+fails, keep the old placement. No direct TV upload/delete is added to the editor endpoint.

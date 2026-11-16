@@ -8,7 +8,7 @@ def _columns(conn, table):
 
 def test_fresh_database_is_at_the_latest_version(tmp_path):
     conn = db.open_db(tmp_path / "fresh.db")
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == len(db.MIGRATIONS) == 5
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == len(db.MIGRATIONS) == 6
     assert {"matte", "matte_shape"} <= _columns(conn, "asset_policy")
 
 
@@ -25,7 +25,7 @@ def test_upgrade_from_v2_preserves_existing_rows(tmp_path):
     conn.commit()
     assert "matte" not in _columns(conn, "asset_policy")
 
-    assert db.migrate(conn) == 5
+    assert db.migrate(conn) == 6
 
     row = conn.execute("SELECT pinned, weight, matte, matte_shape FROM asset_policy").fetchone()
     assert (row["pinned"], row["weight"]) == (1, 2.5)          # untouched
@@ -34,8 +34,8 @@ def test_upgrade_from_v2_preserves_existing_rows(tmp_path):
 
 def test_migration_is_idempotent(tmp_path):
     conn = db.open_db(tmp_path / "idem.db")
-    assert db.migrate(conn) == 5
-    assert db.migrate(conn) == 5
+    assert db.migrate(conn) == 6
+    assert db.migrate(conn) == 6
 
 
 def test_failed_migration_rolls_back_schema_and_version(tmp_path, monkeypatch):
@@ -46,6 +46,6 @@ def test_failed_migration_rolls_back_schema_and_version(tmp_path, monkeypatch):
         "ALTER TABLE placement ADD COLUMN should_rollback TEXT; SELECT missing_column FROM placement;"
     ])
     with pytest.raises(sqlite3.OperationalError): db.migrate(conn)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 5
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 6
     assert "should_rollback" not in _columns(conn, "placement")
     conn.close()

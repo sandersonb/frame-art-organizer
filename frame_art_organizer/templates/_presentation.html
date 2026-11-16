@@ -1,0 +1,67 @@
+{# The preview is ALWAYS the original. SVG coordinates use the server's crop geometry. #}
+<dialog class="modal presentation" x-ref="presentationDialog" aria-labelledby="presentation-title"
+        aria-describedby="presentation-help" @cancel.prevent="closePresentation()">
+  <template x-if="editing">
+    <form @submit.prevent="savePresentation()" :aria-busy="editSaving">
+      <h3 id="presentation-title">Adjust crop / matte</h3>
+      <p class="presentation-name" x-text="editing.name"></p>
+      <div class="presentation-layout">
+        <div class="presentation-preview">
+          <svg :view-box.camel="`0 0 ${editing.width} ${editing.height}`" role="img"
+               :aria-label="cropOverlay ? 'Original photo with a yellow outline showing the area kept by the crop' : 'Whole original photo; matte styling is selected on the TV'">
+            <defs>
+              <mask id="crop-outside">
+                <rect width="100%" height="100%" fill="white"></rect>
+                <rect :x="cropBox.x" :y="cropBox.y" :width="cropBox.width" :height="cropBox.height" fill="black"></rect>
+              </mask>
+            </defs>
+            <image :href="`/asset/${editing.id}/preview`" width="100%" height="100%"
+                   @error="editError = 'Could not load the original preview. Close and try again.'"></image>
+            <g x-show="cropOverlay">
+              <rect width="100%" height="100%" fill="black" opacity=".55" mask="url(#crop-outside)"></rect>
+              <rect :x="cropBox.x" :y="cropBox.y" :width="cropBox.width" :height="cropBox.height"
+                    fill="none" stroke="#facc15" stroke-width="3" vector-effect="non-scaling-stroke"></rect>
+            </g>
+          </svg>
+          <p class="hint" x-text="cropOverlay ? 'The yellow outline is what stays. The shaded area is removed.' : 'The whole original photo is kept. Matte styling is chosen on the TV.'"></p>
+        </div>
+        <div class="presentation-controls">
+          <fieldset :disabled="editSaving">
+            <legend>Display mode</legend>
+            <label class="mode-choice"><input type="radio" name="display-mode" value="auto" x-model="editing.mode">
+              <span><strong>Auto</strong><small>Use the existing upload detection.</small></span></label>
+            <label class="mode-choice"><input type="radio" name="display-mode" value="matte" x-model="editing.mode">
+              <span><strong>Matte</strong><small>Keep the whole photo; let the Frame add the matte.</small></span></label>
+            <label class="mode-choice"><input type="radio" name="display-mode" value="crop" x-model="editing.mode">
+              <span><strong>Crop</strong><small>Fill the screen with a fixed 16:9 crop, without a matte.</small></span></label>
+          </fieldset>
+          <div x-show="editing.mode === 'crop'">
+            <fieldset :disabled="editSaving" x-show="canMoveCrop">
+              <legend>Keep this part of the photo</legend>
+              <div class="crop-presets">
+                <template x-for="(label, i) in cropLabels" :key="label">
+                  <button type="button" class="btn" :class="{active: editing.position === i * 500}"
+                          :aria-pressed="editing.position === i * 500" @click="editing.position = i * 500" x-text="label"></button>
+                </template>
+              </div>
+              <label for="crop-position" class="hint" x-text="`Fine position · ${editing.position / 10}% (${cropLabels[0]} → ${cropLabels[2]})`"></label>
+              <input id="crop-position" type="range" min="0" max="1000" step="1" x-model.number="editing.position"
+                     :aria-label="`Crop position from ${cropLabels[0]} to ${cropLabels[2]}`">
+            </fieldset>
+            <p class="hint" x-show="!canMoveCrop">Already 16:9 — no crop adjustment is needed.</p>
+            <p class="hint" x-text="`${editing.trim_pct}% of the original photo is trimmed. No upscaling is applied.`"></p>
+          </div>
+          <p class="hint" x-show="editing.mode === 'auto'"
+             x-text="editing.auto_kind === 'fill' ? `Auto crops ${editing.trim_pct}% to fill 16:9, centered.` : 'Auto keeps the whole photo using the current matte / fit policy.'"></p>
+          <p class="hint" x-show="editing.mode === 'matte'">Choose matte colors and styles on the TV itself, as before. The app remembers compatible TV choices; otherwise it starts with the configured matte.</p>
+        </div>
+      </div>
+      <p class="hint" id="presentation-help">Your original is never changed. Saving renders a local copy. The Frame updates at a scheduled refresh when this photo is selected and the TV is available.</p>
+      <p class="edit-error" role="alert" x-show="editError" x-text="editError"></p>
+      <div class="modal-actions">
+        <button type="button" class="btn ghost" :disabled="editSaving" @click="closePresentation()">Cancel</button>
+        <button type="submit" class="btn primary" :disabled="editSaving" x-text="editSaving ? 'Rendering…' : 'Save changes'"></button>
+      </div>
+    </form>
+  </template>
+</dialog>

@@ -162,6 +162,27 @@
                 margin-bottom: 12px; cursor: pointer; }
     .dropzone.drag { border-color: var(--accent); color: var(--text); }
 
+    .notice { margin: 14px 24px 0; padding: 12px 16px; background: var(--surface-2);
+              border: 1px solid var(--border); border-radius: 10px; }
+    dialog.presentation { width: min(1000px, calc(100% - 32px)); color: var(--text); }
+    dialog.presentation::backdrop { background: rgba(8,9,12,.8); }
+    .presentation-name { color: var(--muted); overflow-wrap: anywhere; margin: -4px 0 16px; }
+    .presentation-layout { display: grid; grid-template-columns: minmax(0, 1fr) 290px; gap: 24px; }
+    .presentation-preview { min-width: 0; align-self: center; }
+    .presentation-preview svg { display: block; width: 100%; height: auto; max-height: 58vh;
+                                background: #0c0d11; }
+    .presentation-controls fieldset { border: 0; margin: 0 0 16px; padding: 0; min-width: 0; }
+    .presentation-controls legend { font-weight: 600; margin-bottom: 8px; }
+    .mode-choice { display: flex; align-items: flex-start; gap: 8px; padding: 9px 0; cursor: pointer; }
+    .mode-choice input { margin-top: 5px; }
+    .mode-choice small { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
+    .crop-presets { display: flex; gap: 6px; margin-bottom: 12px; }
+    .crop-presets .btn { flex: 1; justify-content: center; padding: 8px; margin-top: 0; }
+    .crop-presets .btn.active { border-color: var(--accent); background: var(--surface-2); }
+    #crop-position { width: 100%; accent-color: #facc15; margin: 12px 0; }
+    .edit-error { color: #fda4af; }
+    button:disabled, fieldset:disabled { opacity: .6; cursor: wait; }
+
     /* mobile */
     @media (max-width: 640px) {
       header { padding: 12px 14px; gap: 10px; }
@@ -172,6 +193,9 @@
       .cards.grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
       .filterbar { padding: 12px 14px; }
       .bulkbar { left: 12px; right: 12px; transform: none; justify-content: center; flex-wrap: wrap; }
+      .presentation-layout { grid-template-columns: 1fr; gap: 16px; }
+      .presentation-preview svg { max-height: 42vh; }
+      .notice { margin: 12px 14px 0; }
     }
   </style>
 </head>
@@ -200,7 +224,10 @@
   </header>
 
   <nav class="filterbar" id="filterbar">{% include "_filterbar.html" %}</nav>
+  <p class="notice" role="status" x-show="notice" x-cloak x-text="notice"></p>
   <main id="gallery">{% include "_gallery.html" %}</main>
+
+  {% include "_presentation.html" %}
 
   <!-- bulk action bar -->
   <div class="bulkbar" x-show="sel.length" x-cloak>
@@ -265,6 +292,7 @@
             <span x-text="details.collections.map(c => c.name).join(', ') || '—'"></span></div>
           <div class="kv"><span>SHA-256</span>
             <span class="mono" x-text="details.sha256.slice(0,16) + '…'"></span></div>
+          <button class="btn" x-show="details.can_adjust" @click="openPresentation(details.id)">Adjust crop / matte</button>
           <button class="btn" @click="details = null">Close</button>
         </div>
       </template>
@@ -319,6 +347,7 @@
         sel: [], showUpload: false, menu: null, addToOpen: false, details: null,
         bulkAddOpen: false, showNewCol: false, newColName: '', newColColor: '#3b82f6',
         drag: false, fileLabel: '',
+        editing: null, editSaving: false, editError: '', notice: '',
         palette: ['#3b82f6', '#8b5cf6', '#10b981', '#ef4444', '#f59e0b', '#14b8a6', '#ec4899', '#6366f1'],
         collections: JSON.parse(document.getElementById('collections-data').textContent),
 
@@ -355,6 +384,47 @@
           this.post(`/asset/${id}/delete`).then(() => this.after());
         },
         viewDetails(id) { this.menu = null; fetch(`/asset/${id}`).then(r => r.json()).then(d => this.details = d); },
+        async openPresentation(id) {
+          this.menu = null;
+          const dialog = this.$refs.presentationDialog; // capture before removing a details template
+          try {
+            const r = await fetch(`/asset/${id}/presentation`);
+            if (!r.ok) throw new Error('Could not open the crop / matte editor.');
+            this.editing = await r.json(); this.editError = ''; this.notice = ''; this.details = null;
+            this.$nextTick(() => { if (!dialog.open) dialog.showModal(); });
+          } catch (e) { this.notice = e.message; }
+        },
+        closePresentation() {
+          if (this.editSaving) return;
+          // Retain a non-null scope for the closed dialog's reactive controls. The
+          // next open fetches saved settings again, so Cancel never persists edits.
+          this.$refs.presentationDialog.close();
+        },
+        get cropOverlay() {
+          return this.editing && (this.editing.mode === 'crop' || (this.editing.mode === 'auto' && this.editing.auto_kind === 'fill'));
+        },
+        get cropBox() {
+          const e = this.editing;
+          if (!e) return { x: 0, y: 0, width: 1, height: 1 };
+          if (!this.cropOverlay) return { x: 0, y: 0, width: e.width, height: e.height };
+          const p = e.mode === 'crop' ? e.position : 500;
+          return { x: Math.floor((e.width - e.crop_width) * p / 1000),
+                   y: Math.floor((e.height - e.crop_height) * p / 1000), width: e.crop_width, height: e.crop_height };
+        },
+        get canMoveCrop() { return this.editing && (this.editing.crop_width < this.editing.width || this.editing.crop_height < this.editing.height); },
+        get cropLabels() { return this.editing && this.editing.crop_width < this.editing.width ? ['Left', 'Center', 'Right'] : ['Top', 'Middle', 'Bottom']; },
+        async savePresentation() {
+          if (this.editSaving || !this.editing) return;
+          this.editSaving = true; this.editError = '';
+          try {
+            const e = this.editing;
+            const r = await this.post(`/asset/${e.id}/presentation`, { mode: e.mode, position: e.position });
+            const data = await r.json();
+            if (!r.ok) throw new Error(typeof data.detail === 'string' ? data.detail : 'Could not save these settings.');
+            this.editSaving = false; this.closePresentation(); this.notice = data.message; this.refresh();
+          } catch (e) { this.editError = e.message; }
+          finally { this.editSaving = false; }
+        },
         newCollection() { this.newColName = ''; this.newColColor = this.palette[0]; this.showNewCol = true; },
         createCollection() {
           const name = this.newColName.trim(); if (!name) return;

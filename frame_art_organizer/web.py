@@ -95,8 +95,10 @@ def create_app(config_path: str | None = None, run_daemon: bool | None = None) -
         out = []
         for a in store.list_gallery(c, filt, sort, fit, pipeline_version):
             d = dict(a)
+            d["pref_matte"], d["pref_shape"] = store.get_matte_pref(c, a["id"],
+                                                                 images.shape_class(a["d_width"], a["d_height"]))
             d["collections"] = [dict(x) for x in store.collections_for_asset(c, a["id"])]
-            d["look"] = look_of(a)
+            d["look"] = look_of(d)
             out.append(d)
         return out
 
@@ -227,11 +229,14 @@ def create_app(config_path: str | None = None, run_daemon: bool | None = None) -
             deriv = store.get_any_derivative(c, asset_id, fit, pipeline_version)
             cols = [dict(r) for r in store.collections_for_asset(c, asset_id)]
             placements = store.present_placements_for_asset(c, asset_id)
-            pref_matte, pref_shape = store.get_matte_pref(c, asset_id)
+            pref_matte, pref_shape = store.get_matte_pref(c, asset_id,
+                images.shape_class(deriv["width"], deriv["height"]) if deriv else None)
+            mode, position = store.get_presentation(c, asset_id)
+            current_fit = images.render_key(mode, position, fit)
         finally:
             c.close()
         return {
-            **badges.details(a, deriv, pref_matte, pref_shape, placements, img),
+            **badges.details(a, deriv, pref_matte, pref_shape, placements, img, current_fit=current_fit),
             "id": a["id"], "original_name": a["original_name"], "title": a["title"],
             "status": a["status"], "width": a["width"], "height": a["height"],
             "bytes": a["bytes"], "mime": a["mime"], "captured_at": a["captured_at"],
@@ -239,7 +244,73 @@ def create_app(config_path: str | None = None, run_daemon: bool | None = None) -
             "on_frame": [p["content_id"] for p in placements],
             "has_derivative": deriv is not None,
             "derivative_id": deriv["id"] if deriv else None,
+            "presentation": {"mode": mode, "position": position},
+            "can_adjust": a["status"] == "active" and bool(a["width"] and a["height"]),
         }
+
+    def editable_asset(c, asset_id):
+        a = store.get_asset(c, asset_id)
+        if a is None or a["status"] == "deleted":
+            raise HTTPException(404, "Photo not found")
+        if a["status"] != "active" or not a["width"] or not a["height"]:
+            raise HTTPException(409, "This photo cannot be rendered")
+        return a
+
+    @app.get("/asset/{asset_id}/presentation")
+    def presentation(asset_id: int):
+        c = conn()
+        try:
+            a = editable_asset(c, asset_id)
+            mode, position = store.get_presentation(c, asset_id)
+        finally:
+            c.close()
+        crop = images.plan_render(a["width"], a["height"], mode="crop")
+        box = crop.crop or (0, 0, *crop.source)
+        auto = images.plan_render(a["width"], a["height"], img.crop_tolerance)
+        # Legacy configurations still follow their configured pipeline under Auto.
+        auto_kind = auto.kind if fit == "auto" else "fill" if fit == "cover" else "fit"
+        return {"id": asset_id, "name": a["title"] or a["original_name"],
+                "width": a["width"], "height": a["height"], "mode": mode, "position": position,
+                "crop_width": box[2] - box[0], "crop_height": box[3] - box[1],
+                "trim_pct": round(crop.trim * 100), "auto_kind": auto_kind}
+
+    @app.get("/asset/{asset_id}/preview")
+    def original_preview(asset_id: int):
+        c = conn()
+        try:
+            a = editable_asset(c, asset_id)
+        finally:
+            c.close()
+        # Always the whole, EXIF-oriented original; never the cropped gallery thumbnail.
+        dest = thumbs_dir / f"{a['sha256']}-editor.jpg"
+        if not dest.exists():
+            try:
+                images.make_thumbnail(a["original_path"], dest, width=1400, max_height=1200)
+            except Exception:
+                raise HTTPException(415, "Could not preview the original photo")
+        return FileResponse(dest)
+
+    @app.post("/asset/{asset_id}/presentation")
+    def save_presentation(asset_id: int, mode: str = Form(...),
+                          position: int = Form(500, ge=0, le=1000)):
+        try:
+            key = images.render_key(mode, position, fit)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+        c = conn()
+        try:
+            a = editable_asset(c, asset_id)
+            try:
+                deriv = ingest.ensure_derivative(c, paths, a, key, pipeline_version, quality, img.crop_tolerance)
+            except (OSError, ValueError):
+                raise HTTPException(422, "Could not render the original photo; settings were not changed")
+            with c:
+                editable_asset(c, asset_id)  # a concurrent delete must not resurrect the photo
+                store.set_presentation(c, asset_id, mode, position)
+        finally:
+            c.close()
+        return {"derivative_id": deriv["id"], "mode": mode, "position": position,
+                "message": "Saved locally. The Frame updates at a scheduled refresh when this photo is selected and the TV is available."}
 
     @app.get("/asset/{asset_id}/download")
     def download(asset_id: int):

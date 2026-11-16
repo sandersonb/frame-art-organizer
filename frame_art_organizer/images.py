@@ -72,24 +72,39 @@ def trim_fraction(width: int, height: int) -> float:
     return 1 - min(ar, _R169) / max(ar, _R169)
 
 
-def plan_render(width: int, height: int, crop_tolerance: float = 0.16) -> RenderPlan:
+def render_key(mode: str, position: int = 500, default_fit: str = "auto") -> str:
+    """Immutable pixel-cache key for a per-photo presentation (position is 0..1000)."""
+    if mode not in ("auto", "matte", "crop"):
+        raise ValueError("mode must be auto, matte, or crop")
+    if isinstance(position, bool) or not isinstance(position, int) or not 0 <= position <= 1000:
+        raise ValueError("crop position must be an integer from 0 to 1000")
+    return f"crop-{position}" if mode == "crop" else "matte" if mode == "matte" else default_fit
+
+
+def plan_render(width: int, height: int, crop_tolerance: float = 0.16, *,
+                mode: str = "auto", position: int = 500) -> RenderPlan:
     """Decide how to render a photo of this (EXIF-oriented) size. Pure.
 
     FILL when the 16:9 crop would trim no more than `crop_tolerance` (near-16:9 photos stay
     full-bleed): crop to exactly 16:9, centered. FIT otherwise: keep the photo whole — no crop,
     no padding; the TV shows it inside a matte (API notes §7.3). Either way the result is only
     ever scaled DOWN to fit 3840x2160: upscaling adds no detail and the TV scales for us.
+
+    Manual ``crop`` always fills, with position 0..1000 along the trimmed axis;
+    manual ``matte`` always fits. Auto retains the original centered/tolerance rule.
     """
     if width <= 0 or height <= 0:
         raise ValueError(f"image size must be positive, got {width}x{height}")
+    render_key(mode, position)  # validate even when there is no crop
     trim = trim_fraction(width, height)
-    if trim <= crop_tolerance:
+    if mode == "crop" or (mode == "auto" and trim <= crop_tolerance):
         kind = "fill"
         if width / height > _R169:                                     # too wide: trim columns
-            cw, ch = min(width, round(height * 16 / 9)), height
+            cw, ch = max(1, min(width, round(height * 16 / 9))), height
         else:                                                          # too tall: trim rows
-            cw, ch = width, min(height, round(width * 9 / 16))
-        left, top = (width - cw) // 2, (height - ch) // 2
+            cw, ch = width, max(1, min(height, round(width * 9 / 16)))
+        offset = position if mode == "crop" else 500
+        left, top = (width - cw) * offset // 1000, (height - ch) * offset // 1000
         crop = (left, top, left + cw, top + ch) if (cw, ch) != (width, height) else None
     else:
         kind, cw, ch, crop = "fit", width, height, None
@@ -105,12 +120,13 @@ def low_res(width, height, long_edge: int) -> bool:
 
 
 def render_derivative(path: str | Path, *, crop_tolerance: float = 0.16,
-                      quality: int = 92) -> tuple[bytes, RenderPlan]:
+                      quality: int = 92, mode: str = "auto",
+                      position: int = 500) -> tuple[bytes, RenderPlan]:
     """Render `path` per `plan_render`; returns (JPEG bytes, the plan used)."""
     with Image.open(path) as im:
         im = ImageOps.exif_transpose(im)   # apply camera orientation first; plan on what's shown
         im = im.convert("RGB")
-        plan = plan_render(*im.size, crop_tolerance=crop_tolerance)
+        plan = plan_render(*im.size, crop_tolerance=crop_tolerance, mode=mode, position=position)
         if plan.scale >= 1.0:
             out = im.crop(plan.crop) if plan.crop else im
         else:
@@ -191,11 +207,15 @@ def render_to_file(src: str | Path, dest: str | Path, mode: str = "cover",
     """Render `src` to a Frame-ready JPEG at `dest`; returns its hash and REAL size.
 
     mode "cover"/"contain" = the v1 pipeline (always exactly 3840x2160); "auto" = the v2
-    native-resolution pipeline (§12.2), where the size varies per photo.
+    native-resolution pipeline (§12.2), where the size varies per photo. ``matte`` and
+    ``crop-<position>`` are immutable per-photo presentation keys (§13), downscale-only.
     """
     plan = None
-    if mode == "auto":
-        data, plan = render_derivative(src, crop_tolerance=crop_tolerance, quality=quality)
+    if mode in ("auto", "matte") or mode.startswith("crop-"):
+        presentation = "crop" if mode.startswith("crop-") else mode
+        position = int(mode[5:]) if presentation == "crop" else 500
+        data, plan = render_derivative(src, crop_tolerance=crop_tolerance, quality=quality,
+                                       mode=presentation, position=position)
         width, height = plan.size
     else:
         data = normalize_to_frame(src, mode=mode, quality=quality)
@@ -215,13 +235,16 @@ def thumb_name(sha256: str, derivative_id: int | None) -> str:
 
 
 def make_thumbnail(src: str | Path, dest: str | Path, width: int = 480,
-                   quality: int = 82) -> Path:
+                   quality: int = 82, max_height: int | None = None) -> Path:
     """Write a small web thumbnail (EXIF-oriented, aspect-preserved) to `dest`."""
     with Image.open(src) as im:
         im = ImageOps.exif_transpose(im).convert("RGB")
         w, h = im.size
         height = max(1, round(h * width / w))
-        im = im.resize((width, height), Image.Resampling.LANCZOS)
+        if max_height is None:
+            im = im.resize((width, height), Image.Resampling.LANCZOS)
+        else:
+            im.thumbnail((width, max_height), Image.Resampling.LANCZOS)
         dest = Path(dest)
         dest.parent.mkdir(parents=True, exist_ok=True)
         im.save(dest, "JPEG", quality=quality)

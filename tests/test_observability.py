@@ -102,7 +102,7 @@ def test_readonly_database_counters_and_batch_progress(conn, tmp_path):
     batches.start(conn, dev, "key", [{"derivative_id": derivative}])
     before = [tuple(r) for r in conn.execute("SELECT * FROM placement")]
     report = database_snapshot(tmp_path / "state.db", "192.0.2.10", "2000-01-01T00:00:00+00:00")
-    assert report["available"] and report["schema"] == 5
+    assert report["available"] and report["schema"] == 6
     assert report["placement_attempts_since_start"] == report["uncertain_attempts_since_start"] == 1
     assert report["unresolved_total"] == 1 and report["manual_review_total"] == 0
     assert report["active_batches"][0]["pending_additions"] == 1

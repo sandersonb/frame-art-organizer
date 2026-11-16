@@ -153,7 +153,24 @@ CREATE TABLE refresh_batch (
 CREATE UNIQUE INDEX uq_active_refresh_batch ON refresh_batch(device_id) WHERE state='active';
 """
 
-MIGRATIONS = [_V1, _V2, _V3, _V4, _V5]  # index+1 == version
+_V6 = """
+ALTER TABLE asset_policy ADD COLUMN render_mode TEXT NOT NULL DEFAULT 'auto'
+    CHECK (render_mode IN ('auto','matte','crop'));
+ALTER TABLE asset_policy ADD COLUMN crop_position INTEGER NOT NULL DEFAULT 500
+    CHECK (crop_position BETWEEN 0 AND 1000);
+-- Keep both shape-scoped TV choices when switching a photo between whole and cropped.
+CREATE TABLE asset_matte (
+    asset_id INTEGER NOT NULL REFERENCES asset(id) ON DELETE CASCADE,
+    shape TEXT NOT NULL CHECK (shape IN ('wide','odd')),
+    matte TEXT NOT NULL,
+    PRIMARY KEY (asset_id, shape)
+);
+INSERT INTO asset_matte (asset_id,shape,matte)
+    SELECT asset_id,matte_shape,matte FROM asset_policy
+    WHERE matte IS NOT NULL AND matte_shape IN ('wide','odd');
+"""
+
+MIGRATIONS = [_V1, _V2, _V3, _V4, _V5, _V6]  # index+1 == version
 
 
 def connect(path: str | Path) -> sqlite3.Connection:

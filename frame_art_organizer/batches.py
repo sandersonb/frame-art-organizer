@@ -17,9 +17,10 @@ def active(conn, device_id):
 
 
 def desired_rows(conn, batch, period):
+    _, default_fit, pipeline_version = json.loads(batch["plan_key"])
     rows = []
     for did in json.loads(batch["desired"]):
-        row = conn.execute("""SELECT d.id AS derivative_id, d.path, d.width, d.height,
+        row = conn.execute("""SELECT d.id AS derivative_id, d.path, d.width, d.height, d.fit_mode, d.pipeline_version,
                                      a.id AS asset_id, a.original_name, a.captured_at,
                                      COALESCE(ap.pinned,0) AS pinned,
                                      ap.matte AS pref_matte, ap.matte_shape AS pref_shape
@@ -28,6 +29,9 @@ def desired_rows(conn, batch, period):
                               WHERE d.id=? AND a.status='active' AND COALESCE(ap.suppressed,0)=0""", (did,)).fetchone()
         if row is None:
             return None
+        if not store.derivative_is_current(conn, row["asset_id"], row["fit_mode"], row["pipeline_version"],
+                                           default_fit, pipeline_version):
+            return None  # a UI edit must supersede a paused batch of old crops
         if period["collections"]:
             names = {c["name"] for c in store.collections_for_asset(conn, row["asset_id"])}
             if not names.intersection(period["collections"]):
