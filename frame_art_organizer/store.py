@@ -6,6 +6,7 @@ queries. All timestamps are UTC ISO-8601 strings.
 from __future__ import annotations
 
 import sqlite3
+import json
 from datetime import datetime, timezone
 
 from . import images, mattes
@@ -316,13 +317,15 @@ def derivatives_to_upload(conn: sqlite3.Connection, device_id, fit_mode,
     ).fetchall()
 
 
-def create_pending_placement(conn, device_id, derivative_id, matte) -> int:
+def create_pending_placement(conn, device_id, derivative_id, matte, *, baseline=None) -> int:
     cur = conn.execute(
-        """INSERT INTO placement (device_id, derivative_id, matte, state, upload_outcome, upload_attempted_at)
-           SELECT ?,?,?,'pending','in_flight',?
+        """INSERT INTO placement (device_id, derivative_id, matte, state, upload_outcome,
+                                  upload_attempted_at, upload_baseline)
+           SELECT ?,?,?,'pending','in_flight',?,?
            WHERE NOT EXISTS (SELECT 1 FROM placement WHERE device_id=?
                              AND (state='pending' OR upload_outcome='uncertain'))""",
-        (device_id, derivative_id, matte, now(), device_id),
+        (device_id, derivative_id, matte, now(),
+         json.dumps(sorted(baseline)) if baseline is not None else None, device_id),
     )
     conn.commit()
     if cur.rowcount != 1:
@@ -333,7 +336,7 @@ def create_pending_placement(conn, device_id, derivative_id, matte) -> int:
 def set_placement_present(conn, placement_id, content_id) -> None:
     conn.execute(
         """UPDATE placement SET content_id=?, state='present', uploaded_at=?, last_verified_at=?,
-           upload_outcome='acknowledged' WHERE id=?""",
+           upload_outcome='acknowledged', upload_baseline=NULL, upload_absence_seen_at=NULL WHERE id=?""",
         (content_id, now(), now(), placement_id),
     )
     conn.commit()
@@ -345,7 +348,8 @@ def set_placement_error(conn, placement_id) -> None:
 
 
 def set_placement_uncertain(conn, placement_id):
-    conn.execute("UPDATE placement SET upload_outcome='uncertain' WHERE id=?", (placement_id,))
+    conn.execute("""UPDATE placement SET upload_outcome='uncertain', upload_failed_at=?,
+                    upload_absence_seen_at=NULL WHERE id=?""", (now(), placement_id))
     conn.commit()
 
 

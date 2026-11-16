@@ -11,14 +11,17 @@ every tick — so churn is intentional, not accidental.
 from __future__ import annotations
 
 import logging
+import math
 import sqlite3
+import time
 from pathlib import Path
 
 from samsungtvws import exceptions
 
 from . import harvest as harvest_mod
-from . import mattes, store
-from .frame_client import FrameAsleep, FrameClient, FrameUploadUncertain
+from . import batches, mattes, store, upload_recovery
+from .frame_client import FrameAsleep, FrameClient, FrameConnectionError, FrameUploadUncertain
+from .device_lock import serialized_device
 
 log = logging.getLogger(__name__)
 
@@ -34,11 +37,16 @@ def plan(conn: sqlite3.Connection, *, device_id, period, fit_mode, pipeline_vers
     A resident photo whose current derivative has not been rendered yet is KEPT, never evicted
     for lack of a replacement: the set must not shrink while a migration is half-rendered.
     """
-    desired = store.compose_working_set(
-        conn, device_id=device_id, collections=period["collections"],
-        fit_mode=fit_mode, pipeline_version=pipeline_version,
-        no_repeat_days=period["no_repeat_days"], set_size=period["set_size"],
-    )
+    batch = batches.active(conn, device_id)
+    desired = None
+    if batch is not None and batch["plan_key"] == batches.key(period, fit_mode, pipeline_version):
+        desired = batches.desired_rows(conn, batch, period)
+    if desired is None:
+        desired = store.compose_working_set(
+            conn, device_id=device_id, collections=period["collections"],
+            fit_mode=fit_mode, pipeline_version=pipeline_version,
+            no_repeat_days=period["no_repeat_days"], set_size=period["set_size"],
+        )
     present = store.present_placements(conn, device_id)
     present_derivs = {p["derivative_id"] for p in present}
     desired_derivs = {r["derivative_id"] for r in desired}
@@ -67,7 +75,7 @@ def _switch_display_away(client, removing: set[str], keep: list[str]) -> None:
     except FrameAsleep:
         raise  # A transport failure is not cosmetic; stop poking an unhealthy TV.
     except Exception:  # noqa: BLE001
-        log.debug("could not switch the display away before deleting (cosmetic)", exc_info=True)
+        log.debug("could not switch the display away before deleting (cosmetic)")
 
 
 def _apply_slideshow(client: FrameClient, period) -> None:
@@ -83,9 +91,11 @@ def _apply_slideshow(client: FrameClient, period) -> None:
             raise
 
 
+@serialized_device
 def refresh(client: FrameClient, conn: sqlite3.Connection, *, device_id, period,
-            fit_mode, pipeline_version, matte_cfg: mattes.MatteConfig,
-            limit: int | None = None) -> dict:
+             fit_mode, pipeline_version, matte_cfg: mattes.MatteConfig,
+            limit: int | None = None, max_operations: int | None = None,
+            max_seconds: float | None = None) -> dict:
     """Reconcile MY-C0002 to the desired set and set the slideshow.
 
     Each upload's matte comes from `mattes.matte_for` (the user's TV-side choice for that photo
@@ -93,7 +103,24 @@ def refresh(client: FrameClient, conn: sqlite3.Connection, *, device_id, period,
     most that many photos this run and evict no more than were added, so the set never shrinks;
     stale versions of photos just re-added are evicted first.
     """
-    store.require_resolved_uploads(conn, device_id)
+    if max_operations is not None and (not isinstance(max_operations, int)
+                                      or isinstance(max_operations, bool) or max_operations < 1):
+        raise ValueError("max_operations must be a positive integer")
+    if max_seconds is not None and (not math.isfinite(max_seconds) or max_seconds <= 0):
+        raise ValueError("max_seconds must be finite and positive")
+    upload_recovery.recover(client, conn, device_id)
+    started = time.monotonic()
+    operations = 0
+
+    def budget_available():
+        return ((max_operations is None or operations < max_operations)
+                and (max_seconds is None or time.monotonic()-started < max_seconds))
+
+    batch = batches.active(conn, device_id)
+    plan_key = batches.key(period, fit_mode, pipeline_version)
+    if batch is not None and (batch["plan_key"] != plan_key or batches.desired_rows(conn, batch, period) is None):
+        batches.finish(conn, batch["id"], superseded=True)
+        batch = None
     desired, to_add, to_remove, _ = plan(
         conn, device_id=device_id, period=period,
         fit_mode=fit_mode, pipeline_version=pipeline_version,
@@ -110,7 +137,17 @@ def refresh(client: FrameClient, conn: sqlite3.Connection, *, device_id, period,
         return {"desired": 0, "added": 0, "removed": 0, "errors": 0, "skipped": "empty-set",
                 "harvested": 0, "removals_skipped": False, "pending_adds": 0, "mattes_used": {},
                 "uploads": [],
-                "interval": period["interval"], "shuffle": period["shuffle"]}
+                 "interval": period["interval"], "shuffle": period["shuffle"]}
+
+    if batch is None:
+        batch = batches.start(conn, device_id, plan_key, desired)
+        if batch["plan_key"] != plan_key:
+            raise store.UploadResolutionRequired("another refresh owns a different working-set plan")
+        desired, to_add, to_remove, _ = plan(
+            conn, device_id=device_id, period=period,
+            fit_mode=fit_mode, pipeline_version=pipeline_version,
+        )
+    log.info("refresh.batch id=%s additions=%s removals=%s", batch["id"], len(to_add), len(to_remove))
 
     added = removed = errors = 0
 
@@ -120,14 +157,19 @@ def refresh(client: FrameClient, conn: sqlite3.Connection, *, device_id, period,
     # retries. Any other harvest failure skips only the evictions so a bug can't stall rotation.
     harvested: list[dict] = []
     removals_ok = True
+    baseline = None
     try:
-        harvested = harvest_mod.harvest(client, conn, device_id)
+        listing = client.list_my_photos()
+        baseline = upload_recovery.inventory_ids(listing)
+        harvested = harvest_mod.harvest(client, conn, device_id, listing=listing)
     except FrameAsleep:
         raise
-    except Exception:  # noqa: BLE001
-        log.exception("refresh[%s]: matte harvest failed — skipping evictions this run",
-                      period["name"])
+    except Exception as exc:  # noqa: BLE001
+        if baseline is None:
+            raise FrameConnectionError("Cannot snapshot My Photos before an upload") from exc
+        log.error("refresh: matte harvest failed — skipping evictions this run")
         removals_ok = False
+        errors += 1
 
     # Read the preferences AFTER the harvest. The plan rows carry copies taken before it, so an
     # edit the user made on the TV since the last run (just harvested above) would otherwise be
@@ -139,10 +181,14 @@ def refresh(client: FrameClient, conn: sqlite3.Connection, *, device_id, period,
     mattes_used: dict[str, int] = {}
     uploads: list[dict] = []   # what went to the wall this run — the canary needs to see it
     for r in adds:
+        if not budget_available():
+            break
+        operations += 1
         pref_matte, pref_shape = prefs.get(r["asset_id"], (None, None))
         matte = mattes.matte_for(pref_matte, pref_shape, r["width"], r["height"], matte_cfg)
-        placement_id = store.create_pending_placement(conn, device_id, r["derivative_id"], matte)
-        log.info("upload.begin placement=%s asset=%s file=%s", placement_id, r["asset_id"], r["original_name"])
+        placement_id = store.create_pending_placement(conn, device_id, r["derivative_id"], matte,
+                                                       baseline=baseline)
+        log.info("upload.begin placement=%s asset=%s", placement_id, r["asset_id"])
         try:
             data = Path(r["path"]).read_bytes()
             log.info("upload.prepared placement=%s asset=%s bytes=%s size=%sx%s matte=%s",
@@ -169,13 +215,23 @@ def refresh(client: FrameClient, conn: sqlite3.Connection, *, device_id, period,
         added_assets.add(r["asset_id"])
         mattes_used[matte] = mattes_used.get(matte, 0) + 1
         uploads.append({"asset_id": r["asset_id"], "name": r["original_name"], "content_id": content_id,
-                        "size": (r["width"], r["height"]), "matte": matte})
+                         "size": (r["width"], r["height"]), "matte": matte})
         added += 1
+        if baseline is not None:
+            baseline.add(content_id)
 
     removals_ok = removals_ok and errors == 0
     removals = to_remove if removals_ok else []
+    remaining_adds = {r["derivative_id"] for r in desired} - {
+        p["derivative_id"] for p in store.present_placements(conn, device_id)}
+    if max_operations is not None and remaining_adds:
+        removals = []  # Chunked rotation never evicts before all replacements arrive.
     if limit is not None:
         removals = sorted(removals, key=lambda p: p["asset_id"] not in added_assets)[:added]
+    if max_operations is not None:
+        removals = removals[:max(0, max_operations-operations)]
+    if not budget_available():
+        removals = []
     if removals:
         remove_ids = {p["content_id"] for p in removals if p["content_id"]}
         keep = [p["content_id"] for p in sorted(store.present_placements(conn, device_id),
@@ -183,6 +239,9 @@ def refresh(client: FrameClient, conn: sqlite3.Connection, *, device_id, period,
                 if p["content_id"] and p["content_id"] not in remove_ids]   # newest first
         _switch_display_away(client, remove_ids, keep)
     for p in removals:
+        if not budget_available():
+            break
+        operations += 1
         try:
             if p["content_id"]:
                 if not client.delete(p["content_id"]):
@@ -205,7 +264,23 @@ def refresh(client: FrameClient, conn: sqlite3.Connection, *, device_id, period,
     else:
         log.warning("refresh[%s]: nothing resident after sync — slideshow left unchanged",
                     period["name"])
+    _, pending_adds, pending_removals, _ = plan(
+        conn, device_id=device_id, period=period, fit_mode=fit_mode, pipeline_version=pipeline_version)
+    complete = not pending_adds and not pending_removals and not errors and removals_ok
+    if complete and max_operations is not None:
+        on_tv = upload_recovery.inventory_ids(client.list_my_photos())
+        wanted = {r["derivative_id"] for r in desired}
+        required = {p["content_id"] for p in store.present_placements(conn, device_id)
+                    if p["derivative_id"] in wanted and p["content_id"]}
+        if not required.issubset(on_tv):
+            log.warning("refresh.batch verification_missing id=%s content_ids=%s", batch["id"], sorted(required-on_tv))
+            raise FrameConnectionError("Final inventory does not confirm the working set; saved batch remains paused")
+    if complete:
+        batches.finish(conn, batch["id"])
+    log.info("refresh.batch id=%s complete=%s pending_adds=%s pending_removals=%s",
+             batch["id"], complete, len(pending_adds), len(pending_removals))
     return {"desired": len(desired), "added": added, "removed": removed, "errors": errors,
-            "harvested": len(harvested), "removals_skipped": not removals_ok,
-            "pending_adds": len(to_add) - len(adds), "mattes_used": mattes_used, "uploads": uploads,
+             "harvested": len(harvested), "removals_skipped": not removals_ok,
+            "pending_adds": len(pending_adds), "pending_removals": len(pending_removals),
+            "complete": complete, "batch_id": batch["id"], "mattes_used": mattes_used, "uploads": uploads,
             "interval": period["interval"], "shuffle": period["shuffle"]}

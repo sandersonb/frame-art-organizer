@@ -11,6 +11,7 @@ import sys
 import threading
 
 import websocket
+from .stack_capture import operation_stacks
 from samsungtvws import SamsungTVWS
 from samsungtvws.art import SamsungTVArt
 from samsungtvws import exceptions, helper
@@ -48,7 +49,8 @@ class ManagedArt(SamsungTVArt):
     def _websocket_event(self, event, response):
         known = {"ms.channel.connect", "ms.channel.ready", "ms.channel.clientConnect",
                  "ms.channel.clientDisconnect", "ms.channel.unauthorized", "ms.channel.timeOut",
-                 "ms.error", "ed.edenTV.update", "ms.voiceApp.hide", "d2d_service_message"}
+                  "ms.error", "ed.edenTV.update", "ms.voiceApp.hide", "d2d_service_message",
+                  "ms.remote.touchEnable", "ms.remote.touchDisable"}
         fields = {"event": event if isinstance(event, str) and event in known else "other"}
         data = response.get("data")
         if event == "ms.channel.connect" and isinstance(data, dict):
@@ -77,6 +79,7 @@ class ManagedArt(SamsungTVArt):
                 connection="Connection: Upgrade",
             )
             self.progress("websocket.upgrade.complete")
+            self.progress("websocket.waiting_connect")
             connected = False
             while True:
                 response = helper.process_api_response(self.connection.recv())
@@ -89,6 +92,7 @@ class ManagedArt(SamsungTVArt):
                 if event == "ms.channel.connect":
                     connected = True
                     self._check_for_token(response)
+                    self.progress("websocket.waiting_ready")
                 elif event == "ms.channel.ready" and connected:
                     return self.connection
                 # Client connect/disconnect broadcasts are not our readiness reply.
@@ -117,7 +121,7 @@ class ManagedArt(SamsungTVArt):
 
     def send_command(self, *args, **kwargs):
         super().send_command(*args, **kwargs)
-        self.progress("art.request.sent")
+        self.progress("art.request.sent", request=self._request_label)
 
     def _open_d2d_socket(self, conn_info):
         self.progress("upload.transfer_connect.begin")
@@ -147,6 +151,10 @@ class ManagedArt(SamsungTVArt):
         if wait_for_sub_event == "image_added":
             self.progress("upload.bytes_sent")
             self.progress("upload.awaiting_ack")
+        elif wait_for_sub_event == "ready_to_use":
+            self.progress("upload.awaiting_transfer_ready")
+        else:
+            self.progress("art.response.waiting", request=self._request_label)
         result = super()._wait_for_d2d(request_uuid=request_uuid,
                                       wait_for_sub_event=wait_for_sub_event)
         if wait_for_sub_event == "image_added":
@@ -178,7 +186,7 @@ class ManagedArt(SamsungTVArt):
         self.progress("connection.close.complete")
 
 
-def run_worker(pipe, cfg, stack_seconds=None, factory=None, parent_pid=None):
+def run_worker(pipe, cfg, stack_seconds=None, factory=None, parent_pid=None, diagnostic_stack_seconds=None):
     """Only plain result/progress/error data crosses IPC; never raw exceptions/tokens."""
     logging.disable(logging.CRITICAL)
     if parent_pid is not None:
@@ -193,61 +201,75 @@ def run_worker(pipe, cfg, stack_seconds=None, factory=None, parent_pid=None):
     if stack_seconds is not None:
         faulthandler.dump_traceback_later(stack_seconds, repeat=True, file=sys.stderr)
 
+    send_lock = threading.Lock()
+
+    def send(message):
+        with send_lock:
+            pipe.send(message)
+
     def progress(stage, **fields):
-        pipe.send(("progress", stage, fields))
+        send(("progress", stage, fields))
 
     tv = art = None
     try:
-        tv = (factory or SamsungTVWS)(
-            host=cfg.host, port=cfg.port, token_file=cfg.token_file,
-            name=cfg.name, timeout=cfg.ws_timeout,
-        )
+        with operation_stacks(diagnostic_stack_seconds,
+                              lambda stacks: progress("worker.stack", stacks=stacks)):
+            tv = (factory or SamsungTVWS)(
+                host=cfg.host, port=cfg.port, token_file=cfg.token_file,
+                name=cfg.name, timeout=cfg.ws_timeout,
+            )
         while True:
             operation, payload = pipe.recv()
             if operation == "close":
                 break
             try:
-                if factory is None:
-                    progress("tcp.probe.begin")
-                    try:
-                        with socket.create_connection((cfg.host, cfg.port), timeout=cfg.connect_timeout):
-                            pass
-                    except OSError:
-                        progress("tcp.probe.unreachable")
-                        raise ApiUnreachable() from None
-                    progress("tcp.probe.complete")
-                if operation == "device_info":
-                    progress("rest.device_info.begin")
-                    result = tv.rest_device_info()
-                    progress("rest.device_info.complete")
-                else:
-                    if art is None:
-                        if factory is not None:
-                            art = tv.art()
-                        else:
-                            art = ManagedArt(
-                                cfg.host, port=cfg.port, token_file=cfg.token_file,
-                                name=cfg.name, timeout=cfg.ws_timeout, progress=progress,
-                            )
-                    art.upload_submitted = False
-                    methods = {"api_version": "get_api_version", "artmode": "get_artmode",
-                               "current": "get_current", "list_my_photos": "available",
-                               "upload_jpeg": "upload", "select": "select_image",
-                               "delete": "delete", "set_slideshow": "set_slideshow_status"}
-                    args, kwargs = payload
-                    result = getattr(art, methods[operation])(*args, **kwargs)
-                pipe.send(("result", result))
+                with operation_stacks(diagnostic_stack_seconds,
+                                      lambda stacks: progress("worker.stack", stacks=stacks)):
+                    if factory is None:
+                        progress("tcp.probe.begin")
+                        try:
+                            with socket.create_connection((cfg.host, cfg.port), timeout=cfg.connect_timeout):
+                                pass
+                        except OSError:
+                            progress("tcp.probe.unreachable")
+                            raise ApiUnreachable() from None
+                        progress("tcp.probe.complete")
+                    if operation == "device_info":
+                        progress("rest.device_info.begin")
+                        result = tv.rest_device_info()
+                        progress("rest.device_info.complete")
+                    else:
+                        if art is None:
+                            if factory is not None:
+                                art = tv.art()
+                            else:
+                                art = ManagedArt(
+                                    cfg.host, port=cfg.port, token_file=cfg.token_file,
+                                    name=cfg.name, timeout=cfg.ws_timeout, progress=progress,
+                                )
+                        art.upload_submitted = False
+                        methods = {"api_version": "get_api_version", "artmode": "get_artmode",
+                                   "current": "get_current", "list_my_photos": "available",
+                                   "upload_jpeg": "upload", "select": "select_image",
+                                   "delete": "delete", "set_slideshow": "set_slideshow_status"}
+                        args, kwargs = payload
+                        result = getattr(art, methods[operation])(*args, **kwargs)
+                send(("result", result))
             except Exception as exc:
                 submitted = bool(getattr(art, "upload_submitted", False))
+                progress("upload.interrupted" if operation == "upload_jpeg" else "operation.error",
+                         operation=operation, error=type(exc).__name__,
+                         cause=type(exc.__cause__).__name__ if exc.__cause__ is not None else "none",
+                         upload_submitted=submitted)
                 # No exception strings: upstream errors may contain raw TV responses.
-                pipe.send(("error", type(exc).__name__, submitted))
+                send(("error", type(exc).__name__, submitted))
                 # Never reuse a broken stream, including for failed upload batches.
                 break
     except (EOFError, BrokenPipeError):
         pass
     except Exception as exc:
         try:
-            pipe.send(("error", type(exc).__name__, False))
+            send(("error", type(exc).__name__, False))
         except (EOFError, BrokenPipeError, OSError):
             pass
     finally:

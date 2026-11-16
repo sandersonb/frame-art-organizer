@@ -135,7 +135,25 @@ UPDATE placement SET upload_outcome='uncertain'
   WHERE state IN ('pending','error','present') AND content_id IS NULL;
 """
 
-MIGRATIONS = [_V1, _V2, _V3, _V4]  # index+1 == version
+_V5 = """
+ALTER TABLE placement ADD COLUMN upload_baseline TEXT;
+ALTER TABLE placement ADD COLUMN upload_failed_at TEXT;
+ALTER TABLE placement ADD COLUMN upload_absence_seen_at TEXT;
+ALTER TABLE placement ADD COLUMN upload_auto_recovered_at TEXT;
+ALTER TABLE placement ADD COLUMN upload_recovery_blocked INTEGER NOT NULL DEFAULT 0;
+CREATE TABLE refresh_batch (
+    id INTEGER PRIMARY KEY,
+    device_id INTEGER NOT NULL REFERENCES device(id),
+    plan_key TEXT NOT NULL,
+    desired TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('active','complete','superseded')),
+    created_at TEXT NOT NULL,
+    completed_at TEXT
+);
+CREATE UNIQUE INDEX uq_active_refresh_batch ON refresh_batch(device_id) WHERE state='active';
+"""
+
+MIGRATIONS = [_V1, _V2, _V3, _V4, _V5]  # index+1 == version
 
 
 def connect(path: str | Path) -> sqlite3.Connection:
@@ -155,9 +173,11 @@ def migrate(conn: sqlite3.Connection) -> int:
     current = conn.execute("PRAGMA user_version").fetchone()[0]
     for version, script in enumerate(MIGRATIONS, start=1):
         if version > current:
-            conn.executescript(script)
-            conn.execute(f"PRAGMA user_version = {version}")
-            conn.commit()
+            try:
+                conn.executescript(f"BEGIN IMMEDIATE;\n{script}\nPRAGMA user_version = {version};\nCOMMIT;")
+            except Exception:
+                conn.rollback()
+                raise
     return conn.execute("PRAGMA user_version").fetchone()[0]
 
 

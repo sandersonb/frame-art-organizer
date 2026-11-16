@@ -25,6 +25,9 @@ import urllib3
 from . import config, db, images, ingest, mattes, purge, scheduler, store, uploader
 from . import harvest as harvest_mod
 from .frame_client import FrameAsleep, FrameClient
+from .device_lock import device_lock
+from . import upload_recovery
+from .observability import Observations
 
 # The Frame's 8002 cert is self-signed; we intentionally don't verify it. Quiet the noise.
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -182,7 +185,8 @@ def cmd_upload_resolve(args) -> int:
             for row in rows:
                 print(f"{row['id']:>4} asset={row['asset_id']} {row['original_name']} "
                       f"{row['width']}x{row['height']} matte={row['matte']} "
-                      f"date={row['captured_at'] or '-'} outcome={row['upload_outcome'] or 'unfinished'}")
+                      f"date={row['captured_at'] or '-'} outcome={row['upload_outcome'] or 'unfinished'} "
+                      f"recovery={'automatic-waiting' if upload_recovery.can_recover([row]) else 'manual-review'}")
             if not rows:
                 print("(no unresolved uploads)")
             return 0
@@ -193,31 +197,39 @@ def cmd_upload_resolve(args) -> int:
         if not (args.content_id or args.not_uploaded):
             print("choose --content-id ID or --not-uploaded after inspecting the TV", file=sys.stderr)
             return EXIT_REFUSED
-        if args.not_uploaded:
-            store.set_placement_error(conn, row["id"])
-            print(f"placement {row['id']}: operator confirmed not uploaded; another attempt is permitted")
-            return 0
-        if conn.execute("SELECT 1 FROM placement WHERE device_id=? AND content_id=?",
-                        (row["device_id"], args.content_id)).fetchone():
-            print("content_id is already recorded; refusing to attach it to another placement", file=sys.stderr)
-            return EXIT_REFUSED
-        fc, _ = _client(args)
-        with fc:
-            info = fc.device_info().get("device", {})
-            if (fc.cfg.host != row["host"]
-                    or (row["duid"] and info.get("duid") != row["duid"])):
-                print("configured TV does not match this placement", file=sys.stderr)
+        with device_lock(conn, row["device_id"]):
+            row = next((r for r in store.unresolved_uploads(conn) if r["id"] == args.placement_id), None)
+            if row is None:
+                print("placement was already resolved", file=sys.stderr)
                 return EXIT_REFUSED
-            item = next((p for p in fc.list_my_photos() if p.get("content_id") == args.content_id), None)
-        if item is None or (int(item.get("width", 0)), int(item.get("height", 0))) != (row["width"], row["height"]):
-            print("content_id is absent from My Photos or its dimensions do not match", file=sys.stderr)
-            return EXIT_REFUSED
-        store.set_placement_present(conn, row["id"], args.content_id)
-        store.add_rotation_event(conn, row["device_id"], row["asset_id"], "added", "operator-resolution")
-        print(f"placement {row['id']}: recorded operator-selected {args.content_id}; no TV changes made")
-        return 0
+            return _resolve_upload_record(conn, row, args)
     finally:
         conn.close()
+
+
+def _resolve_upload_record(conn, row, args):
+    if args.not_uploaded:
+        store.set_placement_error(conn, row["id"])
+        print(f"placement {row['id']}: operator confirmed not uploaded; another attempt is permitted")
+        return 0
+    if conn.execute("SELECT 1 FROM placement WHERE device_id=? AND content_id=?",
+                    (row["device_id"], args.content_id)).fetchone():
+        print("content_id is already recorded; refusing to attach it to another placement", file=sys.stderr)
+        return EXIT_REFUSED
+    fc, _ = _client(args)
+    with fc:
+        info = fc.device_info().get("device", {})
+        if (fc.cfg.host != row["host"] or (row["duid"] and info.get("duid") != row["duid"])):
+            print("configured TV does not match this placement", file=sys.stderr)
+            return EXIT_REFUSED
+        item = next((p for p in fc.list_my_photos() if p.get("content_id") == args.content_id), None)
+    if item is None or (int(item.get("width", 0)), int(item.get("height", 0))) != (row["width"], row["height"]):
+        print("content_id is absent from My Photos or its dimensions do not match", file=sys.stderr)
+        return EXIT_REFUSED
+    store.set_placement_present(conn, row["id"], args.content_id)
+    store.add_rotation_event(conn, row["device_id"], row["asset_id"], "added", "operator-resolution")
+    print(f"placement {row['id']}: recorded operator-selected {args.content_id}; no TV changes made")
+    return 0
 
 
 # ---- collections & policy (local) ----
@@ -296,8 +308,21 @@ def _render_pending(conn, paths, img: config.ImageSettings) -> int:
 
 
 def cmd_schedule_refresh(args) -> int:
+    _setup_logging()
     conn, paths, cfg = _library(args)
     fc, _ = _client(args)
+    observations = Observations(getattr(getattr(fc, "cfg", None), "host", None), scope="cli.schedule-refresh")
+    setter = getattr(fc, "set_observer", None)
+    if setter is not None:
+        setter(observations.progress, observation_id=observations.session)
+    observations.report(paths.get("database"), force=True, reason="command_start")
+    try:
+        return _schedule_refresh(args, conn, paths, cfg, fc)
+    finally:
+        observations.report(paths.get("database"), force=True, reason="command_end")
+
+
+def _schedule_refresh(args, conn, paths, cfg, fc) -> int:
     img = config.image_settings(cfg)
     period = _active_period(cfg)
     _render_pending(conn, paths, img)   # CPU/disk work first, before holding the TV connection
@@ -307,6 +332,8 @@ def cmd_schedule_refresh(args) -> int:
             fc, conn, device_id=device_id, period=period,
             fit_mode=img.default_fit, pipeline_version=img.pipeline_version,
             matte_cfg=img.matte, limit=getattr(args, "limit", None),
+            max_operations=getattr(args, "batch_operations", None),
+            max_seconds=30.0 if getattr(args, "batch_operations", None) is not None else None,
         )
     print(f"refresh[{period['name']}]: desired={res['desired']} added={res['added']} "
           f"removed={res['removed']} errors={res['errors']} matte_edits={res['harvested']}; "
@@ -316,11 +343,14 @@ def cmd_schedule_refresh(args) -> int:
               f"  -> {u['content_id']}")
     if res["mattes_used"]:
         print(f"  mattes on new uploads: {res['mattes_used']}")
-    if res["pending_adds"]:
+    if res["pending_adds"] and getattr(args, "limit", None) is not None:
         print(f"  --limit reached: {res['pending_adds']} more swap(s) pending — run again to continue")
+    if not res.get("complete", True):
+        print(f"  batch {res['batch_id']} paused: {res['pending_adds']} upload(s), "
+              f"{res['pending_removals']} removal(s) pending; next refresh resumes this selection")
     if res["removals_skipped"]:
-        print("  WARNING: matte harvest failed, so evictions were skipped this run; see the log")
-    return 0
+        print("  WARNING: harvest/upload errors prevented evictions; see the log")
+    return 1 if res["errors"] else 0
 
 
 def _plan_rows(conn, img: config.ImageSettings, tolerance: float) -> list[dict]:
@@ -553,10 +583,17 @@ def _positive_seconds(value: str) -> float:
     return seconds
 
 
+def _positive_count(value: str) -> int:
+    count = int(value)
+    if count < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return count
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="fao", description="Frame Art Organizer")
     p.add_argument("--config", default=str(config.DEFAULT_CONFIG_PATH),
-                   help="path to config.toml")
+                   help="path to config.toml (default: ./config.toml in the working directory)")
     sub = p.add_subparsers(dest="command", required=True)
 
     sub.add_parser("ping", help="is the TV reachable?").set_defaults(func=cmd_ping)
@@ -629,6 +666,8 @@ def build_parser() -> argparse.ArgumentParser:
     psr = sub.add_parser("schedule-refresh", help="compose the set, push to the TV, set slideshow")
     psr.add_argument("--limit", type=int, default=None, metavar="N",
                      help="canary: upload at most N photos and evict no more than were added")
+    psr.add_argument("--batch-operations", type=_positive_count, metavar="N",
+                     help="pause after N upload/delete attempts or 30s; resume the saved set on the next call")
     psr.set_defaults(func=cmd_schedule_refresh)
     ppr = sub.add_parser("plan-report", help="dry run: how the v2 render plan would treat each photo")
     ppr.add_argument("--crop-tolerance", type=float, default=None, metavar="X",

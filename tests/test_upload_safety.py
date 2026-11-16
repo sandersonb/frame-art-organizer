@@ -8,6 +8,7 @@ from test_wiring import FakeClient, _refresh, rotation  # noqa: F401
 from frame_art_organizer import cli, db, scheduler, store, uploader
 from frame_art_organizer.frame_client import FrameUploadUncertain
 from frame_art_organizer.mattes import MatteConfig
+from frame_art_organizer.upload_recovery import UploadRecoveryPending
 
 
 def test_lost_upload_reply_quarantines_placement_and_never_evicts(conn, rotation):
@@ -24,7 +25,7 @@ def test_lost_upload_reply_quarantines_placement_and_never_evicts(conn, rotation
     assert row["state"] == "pending" and row["upload_outcome"] == "uncertain"
     assert conn.execute("SELECT state FROM placement WHERE id=?", (old,)).fetchone()[0] == "present"
     calls = list(client.calls)
-    with pytest.raises(store.UploadResolutionRequired): _refresh(client, conn, dev)
+    with pytest.raises(UploadRecoveryPending): _refresh(client, conn, dev)
     assert client.calls == calls  # No harvest, upload, select, delete or slideshow call.
 
 
@@ -38,7 +39,7 @@ def test_sync_also_blocks_automatic_replay(conn, rotation):
     with pytest.raises(FrameUploadUncertain):
         uploader.sync(client, conn, device_id=dev, fit_mode="cover", pipeline_version=1,
                       matte_cfg=MatteConfig())
-    with pytest.raises(store.UploadResolutionRequired):
+    with pytest.raises(UploadRecoveryPending):
         uploader.sync(client, conn, device_id=dev, fit_mode="cover", pipeline_version=1,
                       matte_cfg=MatteConfig())
 
@@ -80,7 +81,7 @@ def test_migration_quarantines_legacy_errors_without_changing_history(tmp_path):
     c.execute("INSERT INTO placement(device_id,derivative_id,state) VALUES (?,?,'present')", (dev, invalid))
     c.commit()
     before = c.execute("SELECT id,state,content_id FROM placement").fetchall()
-    assert db.migrate(c) == 4
+    assert db.migrate(c) == 5
     assert c.execute("SELECT id,state,content_id FROM placement").fetchall() == before
     assert len(store.unresolved_uploads(c, dev)) == 3
     with pytest.raises(store.UploadResolutionRequired): store.require_resolved_uploads(c, dev)

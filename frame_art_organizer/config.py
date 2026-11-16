@@ -31,7 +31,9 @@ def _parse_days(value):
             days.add(idx)
     return days or None
 
-DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.toml"
+# Configuration is deployment data, not a file inside the installed package.
+# Keep this relative until invocation so normal and editable installs agree.
+DEFAULT_CONFIG_PATH = Path("config.toml")
 
 
 def load(path: str | Path = DEFAULT_CONFIG_PATH) -> dict:

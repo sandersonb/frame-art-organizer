@@ -6,7 +6,7 @@ from conftest import add_asset, add_derivative
 from test_daemon_and_cli import library, make_daemon, settled, tv  # noqa: F401
 
 from frame_art_organizer import daemon as daemon_mod, store
-from frame_art_organizer.frame_client import FrameTimeout
+from frame_art_organizer.frame_client import FrameAsleep, FrameTimeout
 
 
 def test_identity_failure_blocks_even_tcp_probes_until_cooldown(tmp_path, tv, monkeypatch):
@@ -66,3 +66,14 @@ def test_incomplete_refresh_does_not_advance_success_timestamp(tmp_path, tv, mon
     monkeypatch.setattr(daemon_mod.scheduler, "refresh", lambda *a, **k: {"errors": 1})
     d._tick_once()
     assert d._last_refresh is None and d._failure_count == 1
+
+
+def test_closed_tcp_gate_pauses_without_exponential_outage_backoff(tmp_path, tv, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(daemon_mod.time, "monotonic", lambda: clock[0])
+    d = make_daemon(tmp_path)
+    monkeypatch.setattr(d, "_ensure_device", lambda *a: (_ for _ in ()).throw(FrameAsleep("port closed")))
+    for _ in range(3):
+        d._tick_once()
+        assert d._retry_at == clock[0]+d.tick and d._failure_count == 0
+        clock[0] = d._retry_at

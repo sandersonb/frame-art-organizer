@@ -14,22 +14,29 @@ import sqlite3
 from pathlib import Path
 
 from . import harvest as harvest_mod
-from . import mattes, store
+from . import mattes, store, upload_recovery
 from .frame_client import FrameAsleep, FrameClient, FrameUploadUncertain
+from .device_lock import serialized_device
 
 log = logging.getLogger(__name__)
 
 
+@serialized_device
 def sync(client: FrameClient, conn: sqlite3.Connection, *, device_id: int,
          fit_mode: str, pipeline_version: int, matte_cfg: mattes.MatteConfig) -> dict:
     """Upload derivatives not yet resident on the device. Two-phase per item.
 
     Each photo's matte comes from `mattes.matte_for` (SPEC.md §12.3)."""
-    store.require_resolved_uploads(conn, device_id)
+    upload_recovery.recover(client, conn, device_id)
     summary = {"uploaded": 0, "errors": 0}
-    for d in store.derivatives_to_upload(conn, device_id, fit_mode, pipeline_version):
+    derivatives = store.derivatives_to_upload(conn, device_id, fit_mode, pipeline_version)
+    if not derivatives:
+        return summary
+    baseline = upload_recovery.inventory_ids(client.list_my_photos())
+    for d in derivatives:
         matte = mattes.matte_for(d["pref_matte"], d["pref_shape"], d["width"], d["height"], matte_cfg)
-        placement_id = store.create_pending_placement(conn, device_id, d["derivative_id"], matte)
+        placement_id = store.create_pending_placement(conn, device_id, d["derivative_id"], matte,
+                                                       baseline=baseline)
         log.info("upload.begin placement=%s asset=%s bytes_from=%s", placement_id, d["asset_id"], d["original_name"])
         try:
             data = Path(d["path"]).read_bytes()
@@ -55,9 +62,11 @@ def sync(client: FrameClient, conn: sqlite3.Connection, *, device_id: int,
         store.set_placement_present(conn, placement_id, content_id)
         log.info("upload.recorded placement=%s asset=%s content_id=%s", placement_id, d["asset_id"], content_id)
         summary["uploaded"] += 1
+        baseline.add(content_id)
     return summary
 
 
+@serialized_device
 def reconcile(client: FrameClient, conn: sqlite3.Connection, device_id: int) -> dict:
     """Diff device MY-C0002 against our `present` placements; converge and flag orphans.
 
@@ -73,7 +82,7 @@ def reconcile(client: FrameClient, conn: sqlite3.Connection, device_id: int) -> 
     try:
         harvested = harvest_mod.harvest(client, conn, device_id, listing=items)
     except Exception as e:  # noqa: BLE001
-        log.exception("reconcile: matte harvest failed")
+        log.error("reconcile: matte harvest failed")
         harvest_error = type(e).__name__
 
     ours = store.present_placements(conn, device_id)

@@ -171,7 +171,7 @@ class StalledTV:
 
 
 @pytest.mark.parametrize("chatter", [False, True])
-def test_real_missing_ready_is_bounded_and_socket_disappears(chatter, tmp_path):
+def test_real_missing_ready_is_bounded_and_socket_disappears(chatter, tmp_path, caplog):
     events = []
     with StalledTV(chatter) as tv:
         fc = FrameClient(FrameConfig(host="127.0.0.1", port=tv.port, ws_timeout=30,
@@ -184,3 +184,29 @@ def test_real_missing_ready_is_bounded_and_socket_disappears(chatter, tmp_path):
         assert tv.closed.wait(1)
     assert any(kw.get("event") == "ms.channel.connect" for _, kw in events)
     assert not any(stage == "art.request.sent" for stage, _ in events)
+    summaries = [json.loads(r.getMessage()[8:]) for r in caplog.records if r.getMessage().startswith("observe ")]
+    failed = next(r for r in summaries if r["event"] == "operation.failed")
+    assert failed["phase"] == "websocket.waiting_ready"
+    assert failed["failure_reason"] == "deadline" and failed["outcome"] == "FrameTimeout"
+    assert failed["last_event"] in {"ms.channel.connect", "ms.channel.clientDisconnect"}
+
+
+def test_diagnostic_worker_stacks_arrive_before_same_deadline(tmp_path):
+    events = []
+    with StalledTV() as tv:
+        fc = FrameClient(FrameConfig(host='127.0.0.1', port=tv.port, ws_timeout=30,
+                                    ws_call_timeout=1, token_file=str(tmp_path/'PRIVATE_TOKEN_PATH')),
+                         diagnostic_stack_seconds=.1,
+                         observer=lambda stage, **kw: events.append((stage, kw)))
+        begun = time.monotonic()
+        with pytest.raises(FrameTimeout):
+            fc.api_version()
+        fc.close()
+        assert time.monotonic()-begun < 2
+        assert tv.closed.wait(1)
+    snapshots = [fields['stacks'] for stage, fields in events if stage=='worker.stack']
+    assert snapshots
+    assert 'PRIVATE_TOKEN_PATH' not in json.dumps(snapshots)
+    assert any(frame['module'].startswith(('websocket', 'frame_art_organizer'))
+               for stacks in snapshots for stack in stacks for frame in stack['frames'])
+    assert fc._process is None and fc._pipe is None

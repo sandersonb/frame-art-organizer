@@ -16,7 +16,7 @@ Type=simple
 User=pi
 WorkingDirectory=/home/pi/frame-art-organizer
 # --daemon force-enables the scheduler regardless of config.toml [daemon].enabled
-ExecStart=/home/pi/frame-art-organizer/.venv/bin/fao serve --host 0.0.0.0 --port 8080 --daemon
+ExecStart=/home/pi/frame-art-organizer/.venv/bin/fao --config /home/pi/frame-art-organizer/config.toml serve --host 0.0.0.0 --port 8080 --daemon
 Restart=on-failure
 RestartSec=5
 # The Frame's self-signed TLS triggers urllib3 warnings; keep the journal readable.

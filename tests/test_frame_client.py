@@ -1,5 +1,6 @@
 """Real spawned worker lifecycle and retry safety, with fake TV I/O (no network)."""
 import json
+import logging
 import multiprocessing
 import os
 import subprocess
@@ -244,6 +245,36 @@ def test_response_errors_are_not_retried_and_do_not_expose_payload(client):
     with pytest.raises(exceptions.ResponseError) as exc: fc.artmode()
     assert "secret" not in str(exc.value)
     assert len([r for r in records(trace) if r["stage"] == "artmode"]) == 1
+
+
+def test_failure_summary_does_not_include_exception_message_or_upload_bytes(client, caplog):
+    caplog.set_level(logging.INFO)
+    fc, _ = client("lostack")
+    with pytest.raises(FrameUploadUncertain): fc.upload_jpeg(b"SECRET_IMAGE_BYTES")
+    rows = [json.loads(r.getMessage()[8:]) for r in caplog.records if r.getMessage().startswith("observe ")]
+    failed = next(r for r in rows if r["event"] == "operation.failed")
+    assert failed["outcome"] == "FrameUploadUncertain" and failed["remote_error"] == "ConnectionFailure"
+    assert failed["worker_pid"] is not None
+    assert "SECRET_IMAGE_BYTES" not in caplog.text and "lost acknowledgement" not in caplog.text
+
+
+def test_broken_observation_callback_cannot_change_upload_outcome(client, caplog):
+    caplog.set_level(logging.INFO)
+    fc, _ = client()
+    def broken(*a, **kw): raise RuntimeError("SECRET_CALLBACK_MESSAGE")
+    fc.set_observer(broken)
+    assert fc.upload_jpeg(b"jpeg") == "MY_F0999"
+    fc.close()
+    assert "SECRET_CALLBACK_MESSAGE" not in caplog.text
+    assert caplog.text.count("observation callback failed") == 1
+
+
+def test_unknown_progress_fields_cannot_leak_tokens_urls_or_responses(client, caplog):
+    caplog.set_level(logging.DEBUG)
+    fc, _ = client()
+    fc._progress("operation.failed", outcome="FrameConnectionError", token="SECRET_TOKEN",
+                 url="wss://tv/?token=SECRET_URL", response={"token": "SECRET_RESPONSE"})
+    assert "SECRET" not in caplog.text
 
 
 @pytest.mark.parametrize("mode,expected", [("delete-absent", True), ("delete-error-absent", True),

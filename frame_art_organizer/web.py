@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
 from . import badges, config, db, images, ingest, store
 from .frame_client import FrameAsleep, FrameClient
+from .device_lock import device_lock
 
 _ENV = jinja2.Environment(
     loader=jinja2.FileSystemLoader(str(Path(__file__).parent / "templates")),
@@ -69,16 +70,17 @@ def create_app(config_path: str | None = None, run_daemon: bool | None = None) -
             try:
                 with FrameClient(config.frame_config(cfg, base)) as fc:
                     for p in placements:
-                        if p["content_id"]:
-                            try:
-                                if not fc.delete(p["content_id"]):
+                        with device_lock(c, p["device_id"]):
+                            if p["content_id"]:
+                                try:
+                                    if not fc.delete(p["content_id"]):
+                                        continue
+                                except FrameAsleep:
+                                    break
+                                except Exception:  # noqa: BLE001
                                     continue
-                            except FrameAsleep:
-                                break
-                            except Exception:  # noqa: BLE001
-                                continue
-                        store.set_placement_deleted(c, p["id"])
-                        store.add_rotation_event(c, p["device_id"], asset_id, "removed", "web-delete")
+                            store.set_placement_deleted(c, p["id"])
+                            store.add_rotation_event(c, p["device_id"], asset_id, "removed", "web-delete")
             except FrameAsleep:
                 pass  # leave placements; the scheduler evicts on next refresh
         store.mark_asset_deleted(c, asset_id)
