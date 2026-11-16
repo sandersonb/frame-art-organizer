@@ -56,8 +56,6 @@ def get_asset(conn, asset_id) -> sqlite3.Row | None:
 # never mutates a file the TV (or an in-flight upload) still uses.
 _RENDER_KEY = """CASE COALESCE(ap.render_mode,'auto')
     WHEN 'crop' THEN 'crop-' || ap.crop_position WHEN 'matte' THEN 'matte' ELSE ? END"""
-_PREFER_CURRENT = (f"ORDER BY (fit_mode = ({_RENDER_KEY}) AND pipeline_version = ?) DESC, "
-                  "pipeline_version DESC, id DESC")
 
 
 def get_presentation(conn, asset_id) -> tuple[str, int]:
@@ -112,7 +110,11 @@ def list_gallery(conn, filt: str = "all", sort: str = "newest",
 
     Each row also carries the geometry of its shown derivative (`d_id`, `d_width`, `d_height`,
     `d_fit`, `d_pv` — NULL if none is rendered) and the matte preference harvested from the TV
-    (`pref_matte`, `pref_shape`), which is what the gallery badges are computed from."""
+    (`pref_matte`, `pref_shape`), which is what the gallery badges are computed from.
+
+    Resolve the current key in WHERE, then fall back to the newest derivative.
+    SQLite 3.40 cannot resolve an outer policy alias in a subquery's ORDER BY.
+    """
     where = ["a.status != 'deleted'"]
     params: list = []
     if filt == "broken":
@@ -133,9 +135,13 @@ def list_gallery(conn, filt: str = "all", sort: str = "newest",
              d.fit_mode AS d_fit, d.pipeline_version AS d_pv,
              ap.matte AS pref_matte, ap.matte_shape AS pref_shape
            FROM asset a
-            LEFT JOIN asset_policy ap ON ap.asset_id = a.id
-            LEFT JOIN derivative d ON d.id = (
-               SELECT id FROM derivative WHERE asset_id = a.id {_PREFER_CURRENT} LIMIT 1)
+           LEFT JOIN asset_policy ap ON ap.asset_id = a.id
+           LEFT JOIN derivative d ON d.id = COALESCE(
+               (SELECT id FROM derivative
+                WHERE asset_id = a.id AND fit_mode = ({_RENDER_KEY}) AND pipeline_version = ?
+                LIMIT 1),
+               (SELECT id FROM derivative WHERE asset_id = a.id
+                ORDER BY pipeline_version DESC, id DESC LIMIT 1))
            WHERE {' AND '.join(where)}
            ORDER BY {order}"""
     return conn.execute(sql, [fit_mode, pipeline_version] + params).fetchall()
